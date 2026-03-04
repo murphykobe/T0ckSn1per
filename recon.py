@@ -33,6 +33,8 @@ CHROME_EXECUTABLE = os.environ.get(
     "CHROME_EXECUTABLE",
     "/root/.cache/ms-playwright/chromium-1194/chrome-linux/chrome",
 )
+# Set PLAYWRIGHT_HEADLESS=1 in environments without a display (CI, containers)
+HEADLESS             = os.environ.get("PLAYWRIGHT_HEADLESS", "0") == "1"
 PAGE_LOAD_TIMEOUT_MS = 15_000
 DEFAULT_PARTY_SIZE   = "2"
 
@@ -70,7 +72,7 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
     async with async_playwright() as p:
         browser: Browser = await p.chromium.launch(
             executable_path=CHROME_EXECUTABLE,
-            headless=False,  # non-headless helps with Cloudflare Turnstile
+            headless=HEADLESS,  # non-headless helps with Cloudflare Turnstile
             args=["--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
