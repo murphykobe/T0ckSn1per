@@ -180,7 +180,7 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
 def _parse_time(t: str) -> Optional[datetime]:
     try:
         return datetime.strptime(t, RESERVATION_TIME_FORMAT)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 
