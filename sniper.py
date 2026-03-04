@@ -46,6 +46,8 @@ CHROME_EXECUTABLE = os.environ.get(
     "CHROME_EXECUTABLE",
     "/root/.cache/ms-playwright/chromium-1194/chrome-linux/chrome",
 )
+# Set PLAYWRIGHT_HEADLESS=1 in environments without a display (CI, containers)
+HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "0") == "1"
 
 REFRESH_DELAY_SEC  = float(os.environ.get("REFRESH_DELAY_SEC", "1.0"))
 JITTER_SEC         = 0.3       # ± random jitter on top of REFRESH_DELAY_SEC
@@ -248,7 +250,7 @@ async def snipe_task(task: Task, dry_run: bool = False) -> bool:
     async with async_playwright() as p:
         browser: Browser = await p.chromium.launch(
             executable_path=CHROME_EXECUTABLE,
-            headless=False,
+            headless=HEADLESS,
             args=["--disable-blink-features=AutomationControlled"],
         )
         context: BrowserContext = await browser.new_context(user_agent=USER_AGENT)
