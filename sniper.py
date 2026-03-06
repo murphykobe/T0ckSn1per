@@ -25,6 +25,7 @@ import logging
 import os
 import random
 import sys
+import time as _time
 from datetime import datetime
 from typing import List, Optional
 
@@ -90,12 +91,14 @@ class DayWorker:
         page: Page,
         found_event: asyncio.Event,
         dry_run: bool = False,
+        interval: float = 30.0,
     ):
         self.task        = task
         self.target      = target
         self.page        = page
         self.found_event = found_event
         self.dry_run     = dry_run
+        self.interval    = interval
         self.checkout_url: Optional[str] = None
 
     async def run(self) -> None:
@@ -106,8 +109,9 @@ class DayWorker:
         )
         try:
             while not self.found_event.is_set():
-                delay = REFRESH_DELAY_SEC + random.uniform(-JITTER_SEC, JITTER_SEC)
-                await asyncio.sleep(max(0.1, delay))
+                jitter = random.uniform(-min(self.interval * 0.1, 2.0), min(self.interval * 0.1, 2.0))
+                delay = max(0.5, self.interval + jitter)
+                await asyncio.sleep(delay)
                 if await self._poll():
                     self.found_event.set()
                     msg = (
@@ -294,6 +298,39 @@ async def _login(page: Page) -> None:
     log.info("Login successful")
 
 
+# ── Release-time scheduler ────────────────────────────────────────────────────
+
+async def _wait_for_release(release_at: str) -> None:
+    """Sleep until release_at HH:MM (local time, 24h). Pre-warms 30s before."""
+    try:
+        now = datetime.now()
+        target = datetime.strptime(release_at, "%H:%M").replace(
+            year=now.year, month=now.month, day=now.day
+        )
+    except ValueError:
+        log.error("Invalid --release-at format '%s'. Use HH:MM (24h), e.g. '10:00'", release_at)
+        return
+
+    if target <= datetime.now():
+        log.info("Release time %s already passed — firing immediately.", release_at)
+        return
+
+    pre_warm_secs = (target.timestamp() - 30) - _time.time()
+    if pre_warm_secs > 0:
+        log.info(
+            "Sleeping %.0fs until pre-warm window (30s before %s)...",
+            pre_warm_secs, release_at,
+        )
+        await asyncio.sleep(pre_warm_secs)
+
+    remaining = target.timestamp() - _time.time()
+    if remaining > 0:
+        log.info("Waiting %.1fs for release at %s — get ready!", remaining, release_at)
+        await asyncio.sleep(remaining)
+
+    log.info("RELEASE TIME %s — firing all workers!", release_at)
+
+
 # ── Task orchestration ────────────────────────────────────────────────────────
 
 async def snipe_task(
@@ -335,17 +372,28 @@ async def snipe_task(
         if interactive_login:
             await _interactive_login(context, PAGE_LOAD_TIMEOUT)
 
+        if release_at:
+            await _wait_for_release(release_at)
+
         # Open one tab per target
         workers: List[DayWorker] = []
         for i, target in enumerate(task.targets):
             page = await context.new_page()
             await _apply_stealth(page)
-            workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run))
+            workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run, interval=interval))
             if i < len(task.targets) - 1:
                 await asyncio.sleep(LAUNCH_STAGGER_SEC)
 
         # Run all workers concurrently
-        await asyncio.gather(*[w.run() for w in workers], return_exceptions=True)
+        gather_coro = asyncio.gather(*[w.run() for w in workers], return_exceptions=True)
+        if max_duration > 0:
+            try:
+                await asyncio.wait_for(gather_coro, timeout=max_duration * 60)
+            except asyncio.TimeoutError:
+                log.info("[%s] max-duration %.0fmin reached — stopping.", task.url, max_duration)
+                found_event.set()  # signal all workers to stop their loops
+        else:
+            await gather_coro
 
         await browser.close()
 
