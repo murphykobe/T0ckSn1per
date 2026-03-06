@@ -7,34 +7,20 @@ from typing import List
 
 RESERVATION_TIME_FORMAT = "%I:%M %p"
 
-MONTH_NUM = {
-    "january": "01",  "february": "02", "march": "03",    "april": "04",
-    "may": "05",      "june": "06",     "july": "07",     "august": "08",
-    "september": "09","october": "10",  "november": "11", "december": "12",
-}
-
 
 @dataclass
-class Task:
+class Target:
     """
-    A single restaurant reservation search target.
+    A single date/time window to watch for a reservation.
 
     Fields
     ------
-    url           : Tock restaurant slug, e.g. "taneda"
-    size          : Party size as a string, e.g. "2"
-    year          : 4-digit year, e.g. "2026"
-    month         : Full month name, e.g. "March"
-    days          : Zero-padded day strings to watch, e.g. ["01", "14", "28"]
+    date          : ISO date string, e.g. "2026-03-15"
     earliest_time : Lower bound of acceptable window, e.g. "5:00 PM"
     latest_time   : Upper bound of acceptable window, e.g. "9:30 PM"
     """
 
-    url:            str
-    size:           str
-    year:           str
-    month:          str
-    days:           List[str]
+    date:           str
     earliest_time:  str
     latest_time:    str
 
@@ -44,27 +30,51 @@ class Task:
     def formatted_latest(self) -> datetime:
         return datetime.strptime(self.latest_time, RESERVATION_TIME_FORMAT)
 
-    def search_url(self) -> str:
-        month_n = MONTH_NUM[self.month.lower()]
+    def search_url(self, restaurant_slug: str, party_size: str) -> str:
         return (
-            f"https://www.exploretock.com/{self.url}/search"
-            f"?date={self.year}-{month_n}-01&size={self.size}&time=19%3A00"
+            f"https://www.exploretock.com/{restaurant_slug}/search"
+            f"?date={self.date}&size={party_size}&time=19%3A00"
         )
 
     def to_dict(self) -> dict:
         return {
-            "url":           self.url,
-            "size":          self.size,
-            "year":          self.year,
-            "month":         self.month,
-            "days":          self.days,
-            "earliest_time": self.earliest_time,
-            "latest_time":   self.latest_time,
+            "date":           self.date,
+            "earliest_time":  self.earliest_time,
+            "latest_time":    self.latest_time,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Target":
+        return cls(**d)
+
+
+@dataclass
+class Task:
+    """
+    A restaurant reservation sniper task.
+
+    Fields
+    ------
+    url     : Tock restaurant slug, e.g. "alinea"
+    size    : Party size as a string, e.g. "2"
+    targets : List of Target objects specifying date/time windows to watch
+    """
+
+    url:     str
+    size:    str
+    targets: List[Target] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "url":     self.url,
+            "size":    self.size,
+            "targets": [t.to_dict() for t in self.targets],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Task":
-        return cls(**d)
+        targets = [Target.from_dict(t) for t in d.get("targets", [])]
+        return cls(url=d["url"], size=d["size"], targets=targets)
 
     def __repr__(self) -> str:
         return json.dumps(self.to_dict(), indent=2)
