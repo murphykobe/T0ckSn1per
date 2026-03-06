@@ -208,6 +208,8 @@ class DayWorker:
                         except PWTimeout:
                             pass
                         self.checkout_url = self.page.url
+                    else:
+                        self.checkout_url = "(dry-run)"
                     return True
         except PWTimeout:
             log.debug("[%s/%s] No search-result cards loaded", self.task.url, self.target.date)
