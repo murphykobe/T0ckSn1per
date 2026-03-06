@@ -35,7 +35,7 @@ from playwright.async_api import (
     TimeoutError as PWTimeout,
 )
 
-from models import Task, RESERVATION_TIME_FORMAT, MONTH_NUM
+from models import Task, Target, RESERVATION_TIME_FORMAT
 from notifier import notify_user
 
 log = logging.getLogger(__name__)
@@ -80,27 +80,28 @@ async def _apply_stealth(page: Page) -> None:
 # ── Per-day worker ────────────────────────────────────────────────────────────
 
 class DayWorker:
-    """Polls one (restaurant, day) combination inside a shared browser context."""
+    """Polls one (restaurant, target) combination inside a shared browser context."""
 
     def __init__(
         self,
         task: Task,
-        day: str,
+        target: Target,
         page: Page,
         found_event: asyncio.Event,
         dry_run: bool = False,
     ):
         self.task        = task
-        self.day         = day
+        self.target      = target
         self.page        = page
         self.found_event = found_event
         self.dry_run     = dry_run
+        self.checkout_url: Optional[str] = None
 
     async def run(self) -> None:
         log.info(
-            "[%s/%s/%s] Worker started | party=%s | %s–%s",
-            self.task.url, self.task.month[:3], self.day,
-            self.task.size, self.task.earliest_time, self.task.latest_time,
+            "[%s/%s] Worker started | party=%s | %s–%s",
+            self.task.url, self.target.date,
+            self.task.size, self.target.earliest_time, self.target.latest_time,
         )
         try:
             while not self.found_event.is_set():
@@ -110,30 +111,30 @@ class DayWorker:
                     self.found_event.set()
                     msg = (
                         f"Restaurant : {self.task.url}\n"
-                        f"  Date     : {self.task.month} {self.day}, {self.task.year}\n"
+                        f"  Date     : {self.target.date}\n"
                         f"  Party    : {self.task.size}\n"
-                        f"  Window   : {self.task.earliest_time} – {self.task.latest_time}"
+                        f"  Window   : {self.target.earliest_time} – {self.target.latest_time}"
                     )
                     notify_user(msg, hold_minutes=BROWSER_HOLD_SEC // 60)
                     if not self.dry_run:
                         log.info(
                             "[%s/%s] Holding browser for %ds — finish checkout now!",
-                            self.task.url, self.day, BROWSER_HOLD_SEC,
+                            self.task.url, self.target.date, BROWSER_HOLD_SEC,
                         )
                         await asyncio.sleep(BROWSER_HOLD_SEC)
                     break
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            log.error("[%s/%s] Unexpected error: %s", self.task.url, self.day, exc)
+            log.error("[%s/%s] Unexpected error: %s", self.task.url, self.target.date, exc)
 
     # ── Poll cycle ────────────────────────────────────────────────────────────
 
     async def _poll(self) -> bool:
-        """Load search page and look for an available slot on self.day."""
+        """Load search page and look for an available slot on self.target.date."""
         try:
             await self.page.goto(
-                self.task.search_url(),
+                self.target.search_url(self.task.url, self.task.size),
                 wait_until="domcontentloaded",
                 timeout=PAGE_LOAD_TIMEOUT,
             )
@@ -142,10 +143,10 @@ class DayWorker:
                 timeout=PAGE_LOAD_TIMEOUT,
             )
         except PWTimeout:
-            log.debug("[%s/%s] Page timeout, retrying", self.task.url, self.day)
+            log.debug("[%s/%s] Page timeout, retrying", self.task.url, self.target.date)
             return False
         except Exception as e:
-            log.warning("[%s/%s] Page load error: %s", self.task.url, self.day, e)
+            log.warning("[%s/%s] Page load error: %s", self.task.url, self.target.date, e)
             return False
 
         # Extra settle time for React to render day buttons after calendar container appears
@@ -155,19 +156,17 @@ class DayWorker:
     async def _try_day(self) -> bool:
         """Click the target day using its aria-label date attribute."""
         try:
-            month_num = MONTH_NUM[self.task.month.lower()]
-            date_str  = f"{self.task.year}-{month_num}-{self.day}"
             btn = await self.page.query_selector(
                 f"button[data-testid='consumer-calendar-day']"
-                f"[aria-label='{date_str}'][aria-disabled='false']"
+                f"[aria-label='{self.target.date}'][aria-disabled='false']"
             )
             if btn:
-                log.info("[%s/%s] Day available — clicking", self.task.url, self.day)
+                log.info("[%s/%s] Day available — clicking", self.task.url, self.target.date)
                 await btn.click()
                 return await self._try_time()
-            log.debug("[%s/%s] Day %s not available", self.task.url, self.day, date_str)
+            log.debug("[%s/%s] Day %s not available", self.task.url, self.target.date, self.target.date)
         except Exception as e:
-            log.debug("[%s/%s] Error in _try_day: %s", self.task.url, self.day, e)
+            log.debug("[%s/%s] Error in _try_day: %s", self.task.url, self.target.date, e)
         return False
 
     async def _try_time(self) -> bool:
@@ -195,20 +194,25 @@ class DayWorker:
                     t = datetime.strptime(time_text, RESERVATION_TIME_FORMAT)
                 except ValueError:
                     continue
-                if self.task.formatted_earliest() <= t <= self.task.formatted_latest():
+                if self.target.earliest_dt() <= t <= self.target.latest_dt():
                     book_btn = await card.query_selector(
                         "button[data-testid='booking-card-button']"
                     )
                     if not book_btn:
                         continue
-                    log.info("[%s/%s] Clicking slot %s", self.task.url, self.day, time_text)
+                    log.info("[%s/%s] Clicking slot %s", self.task.url, self.target.date, time_text)
                     if not self.dry_run:
                         await book_btn.click()
+                        try:
+                            await self.page.wait_for_url("**/checkout/**", timeout=8000)
+                        except PWTimeout:
+                            pass
+                        self.checkout_url = self.page.url
                     return True
         except PWTimeout:
-            log.debug("[%s/%s] No search-result cards loaded", self.task.url, self.day)
+            log.debug("[%s/%s] No search-result cards loaded", self.task.url, self.target.date)
         except Exception as e:
-            log.debug("[%s/%s] Error in _try_time: %s", self.task.url, self.day, e)
+            log.debug("[%s/%s] Error in _try_time: %s", self.task.url, self.target.date, e)
         return False
 
 
@@ -226,15 +230,15 @@ async def _login(page: Page) -> None:
 
 # ── Task orchestration ────────────────────────────────────────────────────────
 
-async def snipe_task(task: Task, dry_run: bool = False) -> bool:
+async def snipe_task(task: Task, dry_run: bool = False) -> Optional[dict]:
     """
-    Open one browser for *task*, one tab per target day, and poll concurrently.
-    Returns True if a reservation was secured.
+    Open one browser for *task*, one tab per target, and poll concurrently.
+    Returns a result dict on success, or None if no reservation was secured.
     """
     found_event = asyncio.Event()
     log.info(
-        "[%s] Starting snipe — %d day(s) to watch in %s %s",
-        task.url, len(task.days), task.month, task.year,
+        "[%s] Starting snipe — %d target(s) to watch",
+        task.url, len(task.targets),
     )
 
     async with async_playwright() as p:
@@ -251,32 +255,43 @@ async def snipe_task(task: Task, dry_run: bool = False) -> bool:
             await _login(login_page)
             await login_page.close()
 
-        # Open one tab per target day
+        # Open one tab per target
         workers: List[DayWorker] = []
-        for i, day in enumerate(task.days):
+        for i, target in enumerate(task.targets):
             page = await context.new_page()
             await _apply_stealth(page)
-            workers.append(DayWorker(task, day, page, found_event, dry_run=dry_run))
-            if i < len(task.days) - 1:
+            workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run))
+            if i < len(task.targets) - 1:
                 await asyncio.sleep(LAUNCH_STAGGER_SEC)
 
         # Run all workers concurrently
         await asyncio.gather(*[w.run() for w in workers], return_exceptions=True)
 
-        if not dry_run:
-            await browser.close()
-        else:
-            # In dry-run, close immediately after checking
-            await browser.close()
+        await browser.close()
 
-    return found_event.is_set()
+    if not found_event.is_set():
+        return None
+
+    # Find the winning worker (the one that captured a checkout URL, or any that fired the event)
+    winning_worker = next(
+        (w for w in workers if w.checkout_url is not None),
+        workers[0] if workers else None,
+    )
+    if winning_worker is None:
+        return None
+
+    return {
+        "restaurant":   task.url,
+        "date":         winning_worker.target.date,
+        "checkout_url": winning_worker.checkout_url or "",
+    }
 
 
 async def snipe_all(tasks: List[Task], dry_run: bool = False) -> None:
     """Run multiple restaurant tasks concurrently."""
     log.info(
-        "Sniping %d restaurant(s) | %d total day-workers",
-        len(tasks), sum(len(t.days) for t in tasks),
+        "Sniping %d restaurant(s) | %d total target-workers",
+        len(tasks), sum(len(t.targets) for t in tasks),
     )
     results = await asyncio.gather(
         *[snipe_task(t, dry_run=dry_run) for t in tasks],
@@ -285,7 +300,7 @@ async def snipe_all(tasks: List[Task], dry_run: bool = False) -> None:
     for task, result in zip(tasks, results):
         if isinstance(result, Exception):
             log.error("[%s] Task failed: %s", task.url, result)
-        elif result:
-            log.info("[%s] Reservation secured!", task.url)
+        elif result is not None:
+            log.info("[%s] Reservation secured! checkout=%s", task.url, result.get("checkout_url"))
         else:
             log.info("[%s] No reservation found in this run.", task.url)
