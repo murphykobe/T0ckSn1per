@@ -221,3 +221,23 @@ class TestFoundEvent:
         worker = DayWorker(task=task, target=target, page=page, found_event=event, dry_run=True)
         await worker.run()
         page.goto.assert_not_awaited()
+
+
+# ── Cookie parsing ────────────────────────────────────────────────────────────
+
+def test_parse_netscape_cookies():
+    from sniper import _parse_netscape_cookies
+    lines = [
+        "# Netscape HTTP Cookie File\n",
+        ".exploretock.com\tTRUE\t/\tTRUE\t0\t_tock_session\tabc123\n",
+        "# comment line\n",
+        ".exploretock.com\tTRUE\t/\tFALSE\t0\ttock_user\txyz\n",
+        "bad line no tabs\n",
+    ]
+    cookies = _parse_netscape_cookies(lines)
+    assert len(cookies) == 2
+    assert cookies[0]["name"] == "_tock_session"
+    assert cookies[0]["value"] == "abc123"
+    assert cookies[0]["secure"] is True
+    assert cookies[1]["name"] == "tock_user"
+    assert cookies[1]["secure"] is False

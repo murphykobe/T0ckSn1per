@@ -218,6 +218,62 @@ class DayWorker:
         return False
 
 
+# ── Cookie helpers ────────────────────────────────────────────────────────────
+
+def _parse_netscape_cookies(lines) -> list:
+    """Parse Netscape-format cookie file lines into Playwright cookie dicts."""
+    cookies = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _, path, secure, expires, name, value = parts[:7]
+        cookies.append({
+            "name":     name,
+            "value":    value,
+            "domain":   domain,
+            "path":     path,
+            "secure":   secure.upper() == "TRUE",
+            "httpOnly": False,
+            "sameSite": "Lax",
+        })
+    return cookies
+
+
+async def _load_cookies(context: BrowserContext, cookies_file: str) -> None:
+    with open(cookies_file) as f:
+        cookies = _parse_netscape_cookies(f.readlines())
+    if cookies:
+        await context.add_cookies(cookies)
+        log.info("Loaded %d cookies from %s", len(cookies), cookies_file)
+    else:
+        log.warning("No cookies parsed from %s", cookies_file)
+
+
+async def _interactive_login(context: BrowserContext, page_load_timeout: int) -> None:
+    """Open Tock login page and wait for the user to log in manually."""
+    import sys
+    page = await context.new_page()
+    await _apply_stealth(page)
+    await page.goto("https://www.exploretock.com/login", timeout=page_load_timeout)
+    print(
+        "\n[AUTH] Browser is open — log in to Tock, then press Enter here to continue...",
+        file=sys.stderr,
+    )
+    try:
+        await page.wait_for_url(
+            lambda url: "/login" not in url,
+            timeout=300_000,  # 5 min
+        )
+        log.info("Login detected — continuing.")
+    except Exception:
+        log.warning("Login timeout or error — continuing anyway.")
+    await page.close()
+
+
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 async def _login(page: Page) -> None:
@@ -265,6 +321,11 @@ async def snipe_task(
             await _apply_stealth(login_page)
             await _login(login_page)
             await login_page.close()
+
+        if cookies_file:
+            await _load_cookies(context, cookies_file)
+        if interactive_login:
+            await _interactive_login(context, PAGE_LOAD_TIMEOUT)
 
         # Open one tab per target
         workers: List[DayWorker] = []
