@@ -241,3 +241,21 @@ def test_parse_netscape_cookies():
     assert cookies[0]["secure"] is True
     assert cookies[1]["name"] == "tock_user"
     assert cookies[1]["secure"] is False
+
+
+# ── interval / max-duration / release-at tests ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_day_worker_uses_interval(task, target):
+    """DayWorker stores interval for use in polling loop."""
+    page = MagicMock()
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event, interval=15.0)
+    assert worker.interval == 15.0
+
+@pytest.mark.asyncio
+async def test_wait_for_release_past_time():
+    """_wait_for_release returns immediately if time already passed."""
+    from sniper import _wait_for_release
+    # Use a time in the past (00:00 is always past during the day)
+    await _wait_for_release("00:00")  # Should return immediately, not sleep
