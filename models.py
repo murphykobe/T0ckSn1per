@@ -3,7 +3,6 @@
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List
 
 RESERVATION_TIME_FORMAT = "%I:%M %p"
 
@@ -24,15 +23,17 @@ class Target:
     earliest_time:  str
     latest_time:    str
 
-    def formatted_earliest(self) -> datetime:
+    def earliest_dt(self) -> datetime:
         return datetime.strptime(self.earliest_time, RESERVATION_TIME_FORMAT)
 
-    def formatted_latest(self) -> datetime:
+    def latest_dt(self) -> datetime:
         return datetime.strptime(self.latest_time, RESERVATION_TIME_FORMAT)
 
     def search_url(self, restaurant_slug: str, party_size: str) -> str:
         return (
             f"https://www.exploretock.com/{restaurant_slug}/search"
+            # Tock's search URL requires a time param; 19:00 is a safe default — actual
+            # time filtering is done by comparing slot times against earliest_time/latest_time.
             f"?date={self.date}&size={party_size}&time=19%3A00"
         )
 
@@ -62,7 +63,7 @@ class Task:
 
     url:     str
     size:    str
-    targets: List[Target] = field(default_factory=list)
+    targets: list[Target] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
