@@ -24,6 +24,7 @@ import asyncio
 import logging
 import os
 import random
+import sys
 from datetime import datetime
 from typing import List, Optional
 
@@ -244,13 +245,20 @@ def _parse_netscape_cookies(lines) -> list:
 
 
 async def _load_cookies(context: BrowserContext, cookies_file: str) -> None:
-    with open(cookies_file) as f:
-        cookies = _parse_netscape_cookies(f.readlines())
+    try:
+        with open(cookies_file) as f:
+            lines = f.readlines()
+    except (FileNotFoundError, PermissionError) as e:
+        log.error("Cannot read cookies file '%s': %s", cookies_file, e)
+        print(f"[AUTH] Error: cannot read cookies file: {e}", file=sys.stderr)
+        return
+    cookies = _parse_netscape_cookies(lines)
     if cookies:
         await context.add_cookies(cookies)
         log.info("Loaded %d cookies from %s", len(cookies), cookies_file)
     else:
-        log.warning("No cookies parsed from %s", cookies_file)
+        log.warning("No cookies parsed from %s — proceeding unauthenticated", cookies_file)
+        print(f"[AUTH] Warning: no cookies found in '{cookies_file}' — proceeding unauthenticated", file=sys.stderr)
 
 
 async def _interactive_login(context: BrowserContext, page_load_timeout: int) -> None:
