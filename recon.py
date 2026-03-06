@@ -29,10 +29,7 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-CHROME_EXECUTABLE = os.environ.get(
-    "CHROME_EXECUTABLE",
-    "/root/.cache/ms-playwright/chromium-1194/chrome-linux/chrome",
-)
+CHROME_EXECUTABLE = os.environ.get("CHROME_EXECUTABLE") or None
 # Set PLAYWRIGHT_HEADLESS=1 in environments without a display (CI, containers)
 HEADLESS             = os.environ.get("PLAYWRIGHT_HEADLESS", "0") == "1"
 PAGE_LOAD_TIMEOUT_MS = 15_000
@@ -70,11 +67,10 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
     result: Dict[str, dict] = {}
 
     async with async_playwright() as p:
-        browser: Browser = await p.chromium.launch(
-            executable_path=CHROME_EXECUTABLE,
-            headless=HEADLESS,  # non-headless helps with Cloudflare Turnstile
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        _launch_kwargs: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
+        if CHROME_EXECUTABLE:
+            _launch_kwargs["executable_path"] = CHROME_EXECUTABLE
+        browser: Browser = await p.chromium.launch(**_launch_kwargs)  # non-headless helps with Cloudflare Turnstile
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -88,9 +84,10 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
             log.info("[recon] Loading %s", url)
             await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
 
-            # Wait for calendar
+            # Wait for calendar + extra settle time for React to render day buttons
             try:
                 await page.wait_for_selector("div.ConsumerCalendar-month", timeout=PAGE_LOAD_TIMEOUT_MS)
+                await page.wait_for_timeout(2000)
             except PWTimeout:
                 log.error(
                     "[recon] Calendar not found for '%s'. "
@@ -99,43 +96,39 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
                 )
                 return result
 
-            month_els = await page.query_selector_all("div.ConsumerCalendar-month")
-            log.info("[recon] Found %d calendar month(s)", len(month_els))
+            # ── Collect all available days via aria-label ("YYYY-MM-DD") ─────
+            # Each available day button carries data-testid="consumer-calendar-day"
+            # and aria-disabled="false", so we don't need to parse month containers.
+            MONTH_NAMES = {
+                "01": "January",  "02": "February", "03": "March",    "04": "April",
+                "05": "May",      "06": "June",     "07": "July",     "08": "August",
+                "09": "September","10": "October",  "11": "November", "12": "December",
+            }
+            day_btns = await page.query_selector_all(
+                "button[data-testid='consumer-calendar-day'][aria-disabled='false']"
+            )
+            log.info("[recon] Found %d available day button(s)", len(day_btns))
 
-            for month_el in month_els:
-                # ── Parse heading ────────────────────────────────────────────
-                heading_el = await month_el.query_selector(
-                    "div.ConsumerCalendar-monthHeading span.H1"
-                )
-                if not heading_el:
+            # Group days by (month_name, year); remember first button per month
+            # for time-slot sampling.
+            from collections import defaultdict
+            months: Dict[str, dict] = {}   # month_name → {year, days, first_btn}
+            for btn in day_btns:
+                label = await btn.get_attribute("aria-label")  # "2026-03-05"
+                if not label or len(label) != 10:
                     continue
-                heading_text = (await heading_el.inner_text()).strip()  # e.g. "March 2026"
-                parts = heading_text.split()
-                if len(parts) == 2:
-                    month_name, yr = parts[0], parts[1]
-                elif len(parts) == 1:
-                    month_name, yr = parts[0], year
-                else:
+                yr, mo, day = label[:4], label[5:7], label[8:10]
+                month_name = MONTH_NAMES.get(mo)
+                if not month_name:
                     continue
+                if month_name not in months:
+                    months[month_name] = {"year": yr, "days": [], "first_btn": btn}
+                months[month_name]["days"].append(day)
 
-                # ── Available days ───────────────────────────────────────────
-                day_btns = await month_el.query_selector_all(
-                    "button.ConsumerCalendar-day.is-in-month.is-available"
-                )
-                available_days: List[str] = []
-                first_btn = None
-                for btn in day_btns:
-                    span = await btn.query_selector("span.B2")
-                    if span:
-                        txt = (await span.inner_text()).strip().zfill(2)
-                        available_days.append(txt)
-                        if first_btn is None:
-                            first_btn = btn
-
-                if not available_days:
-                    log.info("[recon] %s %s: no available days", month_name, yr)
-                    continue
-
+            for month_name, data in months.items():
+                yr            = data["year"]
+                available_days = data["days"]
+                first_btn      = data["first_btn"]
                 log.info(
                     "[recon] %s %s: %d available day(s): %s",
                     month_name, yr, len(available_days), available_days,
@@ -143,27 +136,22 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
 
                 # ── Sample time slots by clicking the first available day ────
                 time_slots: List[str] = []
-                if first_btn:
-                    try:
-                        await first_btn.click()
-                        await page.wait_for_selector(
-                            "button.Consumer-resultsListItem.is-available",
-                            timeout=8_000,
-                        )
-                        slot_btns = await page.query_selector_all(
-                            "button.Consumer-resultsListItem.is-available"
-                        )
-                        for slot in slot_btns:
-                            ts = await slot.query_selector(
-                                "span.Consumer-resultsListItemTime span"
-                            )
-                            if ts:
-                                time_slots.append((await ts.inner_text()).strip())
-                        log.info("[recon] %s: time slots found: %s", month_name, time_slots)
-                    except PWTimeout:
-                        log.debug("[recon] No time slots loaded for %s", month_name)
-                    except Exception as e:
-                        log.debug("[recon] Error fetching time slots: %s", e)
+                try:
+                    await first_btn.click()
+                    await page.wait_for_selector(
+                        "[data-testid='search-result']",
+                        timeout=8_000,
+                    )
+                    cards = await page.query_selector_all("[data-testid='search-result']")
+                    for card in cards:
+                        time_el = await card.query_selector("[data-testid='search-result-time']")
+                        if time_el:
+                            time_slots.append((await time_el.inner_text()).strip())
+                    log.info("[recon] %s: time slots found: %s", month_name, time_slots)
+                except PWTimeout:
+                    log.debug("[recon] No search-result cards loaded for %s", month_name)
+                except Exception as e:
+                    log.debug("[recon] Error fetching time slots: %s", e)
 
                 result[month_name] = {
                     "year":       yr,
