@@ -42,10 +42,7 @@ log = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-CHROME_EXECUTABLE = os.environ.get(
-    "CHROME_EXECUTABLE",
-    "/root/.cache/ms-playwright/chromium-1194/chrome-linux/chrome",
-)
+CHROME_EXECUTABLE = os.environ.get("CHROME_EXECUTABLE") or None
 # Set PLAYWRIGHT_HEADLESS=1 in environments without a display (CI, containers)
 HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "0") == "1"
 
@@ -151,74 +148,67 @@ class DayWorker:
             log.warning("[%s/%s] Page load error: %s", self.task.url, self.day, e)
             return False
 
+        # Extra settle time for React to render day buttons after calendar container appears
+        await self.page.wait_for_timeout(2000)
         return await self._try_day()
 
     async def _try_day(self) -> bool:
+        """Click the target day using its aria-label date attribute."""
         try:
-            month_els = await self.page.query_selector_all("div.ConsumerCalendar-month")
-            month_el  = None
-
-            for el in month_els:
-                heading = await el.query_selector(
-                    "div.ConsumerCalendar-monthHeading span.H1"
-                )
-                if heading:
-                    text = (await heading.inner_text()).lower()
-                    if self.task.month.lower() in text:
-                        month_el = el
-                        break
-
-            if month_el is None:
-                log.debug("[%s/%s] Month %s not in calendar", self.task.url, self.day, self.task.month)
-                return False
-
-            day_btns = await month_el.query_selector_all(
-                "button.ConsumerCalendar-day.is-in-month.is-available"
+            month_num = MONTH_NUM[self.task.month.lower()]
+            date_str  = f"{self.task.year}-{month_num}-{self.day}"
+            btn = await self.page.query_selector(
+                f"button[data-testid='consumer-calendar-day']"
+                f"[aria-label='{date_str}'][aria-disabled='false']"
             )
-            for btn in day_btns:
-                span = await btn.query_selector("span.B2")
-                if not span:
-                    continue
-                if (await span.inner_text()).strip() == self.day:
-                    log.info("[%s/%s] Day available — clicking", self.task.url, self.day)
-                    await btn.click()
-                    return await self._try_time()
-
+            if btn:
+                log.info("[%s/%s] Day available — clicking", self.task.url, self.day)
+                await btn.click()
+                return await self._try_time()
+            log.debug("[%s/%s] Day %s not available", self.task.url, self.day, date_str)
         except Exception as e:
             log.debug("[%s/%s] Error in _try_day: %s", self.task.url, self.day, e)
-
         return False
 
     async def _try_time(self) -> bool:
+        """
+        After a day is selected, find a search-result card whose time falls
+        within the task window and click its 'Book' button.
+
+        Each card uses:
+          data-testid="search-result"          — the card container
+          data-testid="search-result-time"     — the time label (e.g. "5:30 PM")
+          data-testid="booking-card-button"    — the Book action button
+        """
         try:
             await self.page.wait_for_selector(
-                "button.Consumer-resultsListItem.is-available",
+                "[data-testid='search-result']",
                 timeout=SLOT_WAIT_TIMEOUT,
             )
-            slots = await self.page.query_selector_all(
-                "button.Consumer-resultsListItem.is-available"
-            )
-            for slot in slots:
-                ts = await slot.query_selector("span.Consumer-resultsListItemTime span")
-                if not ts:
+            cards = await self.page.query_selector_all("[data-testid='search-result']")
+            for card in cards:
+                time_el = await card.query_selector("[data-testid='search-result-time']")
+                if not time_el:
                     continue
+                time_text = (await time_el.inner_text()).strip()
                 try:
-                    t = datetime.strptime((await ts.inner_text()).strip(), RESERVATION_TIME_FORMAT)
+                    t = datetime.strptime(time_text, RESERVATION_TIME_FORMAT)
                 except ValueError:
                     continue
                 if self.task.formatted_earliest() <= t <= self.task.formatted_latest():
-                    log.info(
-                        "[%s/%s] Clicking slot %s",
-                        self.task.url, self.day, (await ts.inner_text()).strip(),
+                    book_btn = await card.query_selector(
+                        "button[data-testid='booking-card-button']"
                     )
+                    if not book_btn:
+                        continue
+                    log.info("[%s/%s] Clicking slot %s", self.task.url, self.day, time_text)
                     if not self.dry_run:
-                        await slot.click()
+                        await book_btn.click()
                     return True
         except PWTimeout:
-            log.debug("[%s/%s] No time slots loaded", self.task.url, self.day)
+            log.debug("[%s/%s] No search-result cards loaded", self.task.url, self.day)
         except Exception as e:
             log.debug("[%s/%s] Error in _try_time: %s", self.task.url, self.day, e)
-
         return False
 
 
@@ -248,11 +238,10 @@ async def snipe_task(task: Task, dry_run: bool = False) -> bool:
     )
 
     async with async_playwright() as p:
-        browser: Browser = await p.chromium.launch(
-            executable_path=CHROME_EXECUTABLE,
-            headless=HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        _launch_kwargs: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
+        if CHROME_EXECUTABLE:
+            _launch_kwargs["executable_path"] = CHROME_EXECUTABLE
+        browser: Browser = await p.chromium.launch(**_launch_kwargs)
         context: BrowserContext = await browser.new_context(user_agent=USER_AGENT)
 
         # Optional login (shared session across all tabs)

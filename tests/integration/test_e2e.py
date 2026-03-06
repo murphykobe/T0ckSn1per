@@ -31,6 +31,7 @@ import asyncio
 import os
 import pytest
 from datetime import datetime
+from typing import Optional
 from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeout
 
 import sys
@@ -41,19 +42,21 @@ from sniper import DayWorker, CHROME_EXECUTABLE, HEADLESS, USER_AGENT
 from models import Task
 from tests.integration.conftest import TEST_SLUG, TEST_SIZE, tock_search_url
 
-PAGE_LOAD_TIMEOUT = 20_000   # ms
-SLOT_CLICK_TIMEOUT = 10_000  # ms — how long to wait for cart UI to appear after click
+PAGE_LOAD_TIMEOUT  = 20_000  # ms
+CART_WAIT_TIMEOUT  = 12_000  # ms — how long to wait for checkout page after Book click
 
-# Tock cart / checkout selectors — checked in order, first match wins.
-# Update this list if Tock changes their markup.
-CART_SELECTORS = [
-    "[class*='CheckoutDrawer']",     # checkout drawer panel
-    "[class*='CartDrawer']",         # cart drawer
-    "[class*='Checkout']",           # any checkout wrapper
-    "[class*='Cart'][class*='Item']",# cart item
-    "button[class*='checkout']",     # checkout CTA button
-    "button[class*='reserve']",      # reserve/book button post-slot-click
-    "[data-testid='cart']",          # data-testid fallback
+# Cart detection signals — checked in order, first match wins.
+# We prefer URL patterns and data-testid / visible text over CSS class names
+# so these stay stable across Tock redesigns.
+CART_SIGNALS = [
+    # 1. URL navigates to the checkout flow (most reliable)
+    ("url",     "**/checkout/**"),
+    # 2. Tock puts a countdown hold timer on the checkout page
+    ("testid",  "holding-time"),
+    # 3. Checkout page heading (visible text, locale-independent enough)
+    ("testid",  "reservation-date"),
+    # 4. Step indicator present on the checkout page
+    ("text",    "Complete your reservation"),
 ]
 
 
@@ -67,15 +70,26 @@ async def _apply_stealth(page: Page) -> None:
         )
 
 
-async def _find_cart_element(page: Page) -> str | None:
+async def _find_cart(page: Page) -> Optional[str]:
     """
-    Wait up to SLOT_CLICK_TIMEOUT ms for any cart/checkout element to appear.
-    Returns the matching selector string, or None if nothing appeared.
+    Wait for any cart/checkout signal to appear after the Book button is clicked.
+    Returns a human-readable description of what matched, or None on timeout.
     """
-    for selector in CART_SELECTORS:
+    for kind, value in CART_SIGNALS:
         try:
-            await page.wait_for_selector(selector, timeout=SLOT_CLICK_TIMEOUT)
-            return selector
+            if kind == "url":
+                await page.wait_for_url(value, timeout=CART_WAIT_TIMEOUT)
+                return f"checkout URL: {page.url}"
+            elif kind == "testid":
+                await page.wait_for_selector(
+                    f"[data-testid='{value}']", timeout=CART_WAIT_TIMEOUT
+                )
+                return f"data-testid={value!r}"
+            elif kind == "text":
+                await page.wait_for_selector(
+                    f"text={value}", timeout=CART_WAIT_TIMEOUT
+                )
+                return f"visible text: {value!r}"
         except PWTimeout:
             continue
     return None
@@ -119,11 +133,10 @@ async def test_reservation_added_to_cart():
     winning_url         = None
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            executable_path=CHROME_EXECUTABLE,
-            headless=HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        _lkw: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
+        if CHROME_EXECUTABLE:
+            _lkw["executable_path"] = CHROME_EXECUTABLE
+        browser = await p.chromium.launch(**_lkw)
         context = await browser.new_context(user_agent=USER_AGENT)
         page    = await context.new_page()
         await _apply_stealth(page)
@@ -153,21 +166,20 @@ async def test_reservation_added_to_cart():
             )
 
         # ── Step 3: assert cart/checkout UI appeared ──────────────────────────
-        winning_url = page.url
-        cart_selector_found = await _find_cart_element(page)
+        winning_url   = page.url
+        cart_signal   = await _find_cart(page)
 
         await browser.close()
 
     # ── Assertions ────────────────────────────────────────────────────────────
     print(f"[e2e] Page URL after click : {winning_url}")
-    print(f"[e2e] Cart selector matched: {cart_selector_found!r}")
+    print(f"[e2e] Cart signal matched  : {cart_signal!r}")
 
-    assert cart_selector_found is not None, (
-        f"Slot was clicked for {task.url} on {task.month} {day}, "
-        f"but no cart/checkout UI appeared on the page.\n"
+    assert cart_signal is not None, (
+        f"Book button was clicked for {task.url} on {task.month} {day}, "
+        f"but no checkout page appeared.\n"
         f"URL after click: {winning_url}\n"
-        f"Selectors tried: {CART_SELECTORS}\n"
-        "Add the correct Tock cart selector to CART_SELECTORS in this file."
+        f"Signals tried: {CART_SIGNALS}\n"
     )
 
-    print(f"\n[e2e] PASS — reservation added to cart via selector: {cart_selector_found!r}")
+    print(f"\n[e2e] PASS — reservation added to cart: {cart_signal}")

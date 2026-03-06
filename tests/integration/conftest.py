@@ -15,10 +15,7 @@ import pytest
 from datetime import datetime
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
-CHROME_EXECUTABLE = os.environ.get(
-    "CHROME_EXECUTABLE",
-    "/root/.cache/ms-playwright/chromium-1194/chrome-linux/chrome",
-)
+CHROME_EXECUTABLE = os.environ.get("CHROME_EXECUTABLE") or None
 HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "0") == "1"
 
 USER_AGENT = (
@@ -43,11 +40,10 @@ def tock_search_url(slug: str = TEST_SLUG, size: str = TEST_SIZE) -> str:
 async def browser():
     """Launch a real Chromium browser; close it after the test."""
     async with async_playwright() as p:
-        b: Browser = await p.chromium.launch(
-            executable_path=CHROME_EXECUTABLE,
-            headless=HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        _lkw: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
+        if CHROME_EXECUTABLE:
+            _lkw["executable_path"] = CHROME_EXECUTABLE
+        b: Browser = await p.chromium.launch(**_lkw)
         yield b
         await b.close()
 
