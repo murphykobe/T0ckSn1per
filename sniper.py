@@ -232,7 +232,16 @@ async def _login(page: Page) -> None:
 
 # ── Task orchestration ────────────────────────────────────────────────────────
 
-async def snipe_task(task: Task, dry_run: bool = False) -> Optional[dict]:
+async def snipe_task(
+    task: Task,
+    dry_run: bool = False,
+    interval: float = 30.0,
+    max_duration: float = 0,
+    release_at=None,
+    cookies_file=None,
+    interactive_login: bool = False,
+    prompt_login: bool = False,
+) -> Optional[dict]:
     """
     Open one browser for *task*, one tab per target, and poll concurrently.
     Returns a result dict on success, or None if no reservation was secured.
@@ -289,20 +298,36 @@ async def snipe_task(task: Task, dry_run: bool = False) -> Optional[dict]:
     }
 
 
-async def snipe_all(tasks: List[Task], dry_run: bool = False) -> None:
-    """Run multiple restaurant tasks concurrently."""
+async def snipe_all(tasks: List[Task], **kwargs) -> List[dict]:
+    """Run multiple restaurant tasks concurrently, returning a list of result dicts."""
     log.info(
         "Sniping %d restaurant(s) | %d total target-workers",
         len(tasks), sum(len(t.targets) for t in tasks),
     )
-    results = await asyncio.gather(
-        *[snipe_task(t, dry_run=dry_run) for t in tasks],
+    raw = await asyncio.gather(
+        *[snipe_task(t, **kwargs) for t in tasks],
         return_exceptions=True,
     )
-    for task, result in zip(tasks, results):
-        if isinstance(result, Exception):
-            log.error("[%s] Task failed: %s", task.url, result)
-        elif result is not None:
-            log.info("[%s] Reservation secured! checkout=%s", task.url, result.get("checkout_url"))
+    results = []
+    for task, outcome in zip(tasks, raw):
+        if isinstance(outcome, Exception):
+            log.error("[%s] Task failed: %s", task.url, outcome)
+            results.append({
+                "status": "error",
+                "restaurant": task.url,
+                "error": str(outcome),
+                "date": "",
+                "checkout_url": "",
+            })
+        elif outcome:
+            log.info("[%s] Reservation secured! checkout=%s", task.url, outcome.get("checkout_url"))
+            results.append({"status": "success", **outcome})
         else:
             log.info("[%s] No reservation found in this run.", task.url)
+            results.append({
+                "status": "no_slots",
+                "restaurant": task.url,
+                "date": "",
+                "checkout_url": "",
+            })
+    return results
