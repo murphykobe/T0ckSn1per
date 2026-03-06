@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
 
-from models import Task, MONTH_NUM, RESERVATION_TIME_FORMAT
+from models import Task, Target, RESERVATION_TIME_FORMAT
 
 log = logging.getLogger(__name__)
 
@@ -53,9 +53,9 @@ async def _new_stealth_page(context: BrowserContext) -> Page:
 
 async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
     """
-    Open the Tock search page for *slug* and extract available months/days.
-    Returns a dict keyed by month name:
-        { "March": { "year": "2026", "days": ["01","14"], "time_slots": ["5:00 PM", ...] } }
+    Open the Tock search page for *slug* and extract available dates.
+    Returns a dict keyed by ISO date string ("YYYY-MM-DD"):
+        { "2026-03-15": { "time_slots": ["5:00 PM", ...] }, ... }
     """
     month_n = f"{datetime.now().month:02d}"
     year    = str(datetime.now().year)
@@ -98,43 +98,27 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
 
             # ── Collect all available days via aria-label ("YYYY-MM-DD") ─────
             # Each available day button carries data-testid="consumer-calendar-day"
-            # and aria-disabled="false", so we don't need to parse month containers.
-            MONTH_NAMES = {
-                "01": "January",  "02": "February", "03": "March",    "04": "April",
-                "05": "May",      "06": "June",     "07": "July",     "08": "August",
-                "09": "September","10": "October",  "11": "November", "12": "December",
-            }
+            # and aria-disabled="false".
             day_btns = await page.query_selector_all(
                 "button[data-testid='consumer-calendar-day'][aria-disabled='false']"
             )
             log.info("[recon] Found %d available day button(s)", len(day_btns))
 
-            # Group days by (month_name, year); remember first button per month
-            # for time-slot sampling.
+            # Group by date string; remember first button per date for time-slot sampling.
             from collections import defaultdict
-            months: Dict[str, dict] = {}   # month_name → {year, days, first_btn}
+            dates: Dict[str, dict] = {}   # date_str → {first_btn}
             for btn in day_btns:
                 label = await btn.get_attribute("aria-label")  # "2026-03-05"
                 if not label or len(label) != 10:
                     continue
-                yr, mo, day = label[:4], label[5:7], label[8:10]
-                month_name = MONTH_NAMES.get(mo)
-                if not month_name:
-                    continue
-                if month_name not in months:
-                    months[month_name] = {"year": yr, "days": [], "first_btn": btn}
-                months[month_name]["days"].append(day)
+                if label not in dates:
+                    dates[label] = {"first_btn": btn}
 
-            for month_name, data in months.items():
-                yr            = data["year"]
-                available_days = data["days"]
-                first_btn      = data["first_btn"]
-                log.info(
-                    "[recon] %s %s: %d available day(s): %s",
-                    month_name, yr, len(available_days), available_days,
-                )
+            for date_str, data in dates.items():
+                first_btn = data["first_btn"]
+                log.info("[recon] Available date: %s", date_str)
 
-                # ── Sample time slots by clicking the first available day ────
+                # ── Sample time slots by clicking the available day ──────────
                 time_slots: List[str] = []
                 try:
                     await first_btn.click()
@@ -147,17 +131,13 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
                         time_el = await card.query_selector("[data-testid='search-result-time']")
                         if time_el:
                             time_slots.append((await time_el.inner_text()).strip())
-                    log.info("[recon] %s: time slots found: %s", month_name, time_slots)
+                    log.info("[recon] %s: time slots found: %s", date_str, time_slots)
                 except PWTimeout:
-                    log.debug("[recon] No search-result cards loaded for %s", month_name)
+                    log.debug("[recon] No search-result cards loaded for %s", date_str)
                 except Exception as e:
                     log.debug("[recon] Error fetching time slots: %s", e)
 
-                result[month_name] = {
-                    "year":       yr,
-                    "days":       available_days,
-                    "time_slots": time_slots,
-                }
+                result[date_str] = {"time_slots": time_slots}
 
         finally:
             await browser.close()
@@ -185,11 +165,16 @@ def _time_str(dt: datetime) -> str:
 
 
 def _build_tasks(slug: str, size: str, availability: Dict[str, dict]) -> List[Task]:
-    tasks = []
-    for month_name, data in availability.items():
-        if not data["days"]:
-            continue
+    """
+    Build one Task per restaurant, grouping all available dates as Targets.
 
+    *availability* maps date_str ("YYYY-MM-DD") → {"time_slots": [...]}
+    """
+    if not availability:
+        return []
+
+    targets: List[Target] = []
+    for date_str, data in availability.items():
         slots = [_parse_time(t) for t in data.get("time_slots", []) if _parse_time(t)]
         if slots:
             earliest_time = _time_str(min(slots))
@@ -198,21 +183,21 @@ def _build_tasks(slug: str, size: str, availability: Dict[str, dict]) -> List[Ta
             log.warning(
                 "[recon] %s: could not sample time slots — using broad fallback window. "
                 "Confirm actual availability and set times manually if needed.",
-                month_name,
+                date_str,
             )
-            earliest_time = "11:00 AM"
-            latest_time   = "11:30 PM"
+            earliest_time = "12:00 PM"
+            latest_time   = "11:00 PM"
 
-        tasks.append(Task(
-            url=slug,
-            size=size,
-            year=data["year"],
-            month=month_name,
-            days=data["days"],
+        targets.append(Target(
+            date=date_str,
             earliest_time=earliest_time,
             latest_time=latest_time,
         ))
-    return tasks
+
+    if not targets:
+        return []
+
+    return [Task(url=slug, size=size, targets=targets)]
 
 
 # ── Optional Claude enhancement ───────────────────────────────────────────────
@@ -238,23 +223,25 @@ Restaurant slug : {slug}
 Party size      : {size}
 Raw scraped data: {json.dumps(raw, indent=2)}
 
-Based on this data, return a JSON array of task objects with this schema:
+Based on this data, return a JSON array containing exactly ONE task object with this schema:
 [
   {{
-    "url":           "{slug}",
-    "size":          "{size}",
-    "year":          "2026",
-    "month":         "March",
-    "days":          ["01", "15"],
-    "earliest_time": "5:00 PM",
-    "latest_time":   "9:30 PM"
+    "url":     "{slug}",
+    "size":    "{size}",
+    "targets": [
+      {{
+        "date":           "2026-03-15",
+        "earliest_time":  "5:00 PM",
+        "latest_time":    "9:30 PM"
+      }}
+    ]
   }}
 ]
 
 Rules:
-- Only include months/days that appear in the raw data.
-- Set earliest_time to the first available slot.
-- Set latest_time to the last available slot.
+- Include one Target per available date from the raw data.
+- Set earliest_time to the first available slot for that date.
+- Set latest_time to the last available slot for that date.
 - Return ONLY the JSON array, no explanation.
 """
         resp = client.messages.create(
@@ -293,7 +280,9 @@ async def recon(slug: str, size: str = DEFAULT_PARTY_SIZE) -> List[Task]:
 
     log.info("[recon] Generated %d task(s) for %s", len(tasks), slug)
     for t in tasks:
-        log.info("  %s %s | days: %s | %s – %s", t.month, t.year, t.days, t.earliest_time, t.latest_time)
+        log.info("  %s | %d target(s)", t.url, len(t.targets))
+        for tgt in t.targets:
+            log.info("    %s | %s – %s", tgt.date, tgt.earliest_time, tgt.latest_time)
 
     return tasks
 

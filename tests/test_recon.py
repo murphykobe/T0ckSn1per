@@ -7,7 +7,7 @@ from datetime import datetime
 import pytest
 
 from recon import _parse_time, _time_str, _build_tasks
-from models import Task, RESERVATION_TIME_FORMAT
+from models import Task, Target, RESERVATION_TIME_FORMAT
 
 
 class TestParseTime:
@@ -53,105 +53,83 @@ class TestTimeStr:
 
 
 class TestBuildTasks:
-    def _availability(self, **kwargs):
-        """Helper to build a minimal availability dict."""
-        return kwargs
+    """
+    _build_tasks(slug, size, availability) now takes:
+      availability: Dict[date_str, {"time_slots": [...]}]
+    and returns a list containing ONE Task with one Target per date.
+    """
 
     def test_basic_task_created(self):
         avail = {
-            "March": {
-                "year": "2026",
-                "days": ["01", "15"],
-                "time_slots": ["5:00 PM", "7:00 PM", "9:00 PM"],
-            }
+            "2026-03-01": {"time_slots": ["5:00 PM", "7:00 PM", "9:00 PM"]},
+            "2026-03-15": {"time_slots": ["5:00 PM", "9:00 PM"]},
         }
         tasks = _build_tasks("canlis", "2", avail)
         assert len(tasks) == 1
         t = tasks[0]
         assert t.url == "canlis"
         assert t.size == "2"
-        assert t.year == "2026"
-        assert t.month == "March"
-        assert t.days == ["01", "15"]
+        assert len(t.targets) == 2
+        dates = {tgt.date for tgt in t.targets}
+        assert dates == {"2026-03-01", "2026-03-15"}
 
     def test_earliest_and_latest_from_slots(self):
         avail = {
-            "March": {
-                "year": "2026",
-                "days": ["01"],
-                "time_slots": ["7:00 PM", "5:00 PM", "9:30 PM"],
-            }
+            "2026-03-01": {"time_slots": ["7:00 PM", "5:00 PM", "9:30 PM"]},
         }
         tasks = _build_tasks("canlis", "2", avail)
         t = tasks[0]
-        assert t.earliest_time == "5:00 PM"
-        assert t.latest_time == "9:30 PM"
+        tgt = t.targets[0]
+        assert tgt.earliest_time == "5:00 PM"
+        assert tgt.latest_time == "9:30 PM"
 
     def test_fallback_window_when_no_slots(self):
         avail = {
-            "March": {
-                "year": "2026",
-                "days": ["01"],
-                "time_slots": [],
-            }
+            "2026-03-01": {"time_slots": []},
         }
         tasks = _build_tasks("canlis", "2", avail)
         t = tasks[0]
-        assert t.earliest_time == "11:00 AM"
-        assert t.latest_time == "11:30 PM"
+        tgt = t.targets[0]
+        assert tgt.earliest_time == "12:00 PM"
+        assert tgt.latest_time == "11:00 PM"
 
     def test_fallback_when_time_slots_key_missing(self):
         avail = {
-            "March": {
-                "year": "2026",
-                "days": ["01"],
-            }
+            "2026-03-01": {},
         }
         tasks = _build_tasks("canlis", "2", avail)
         t = tasks[0]
-        assert t.earliest_time == "11:00 AM"
-        assert t.latest_time == "11:30 PM"
+        tgt = t.targets[0]
+        assert tgt.earliest_time == "12:00 PM"
+        assert tgt.latest_time == "11:00 PM"
 
-    def test_skips_month_with_no_days(self):
+    def test_multiple_dates_produce_multiple_targets(self):
         avail = {
-            "March": {"year": "2026", "days": [], "time_slots": []},
-            "April": {"year": "2026", "days": ["10"], "time_slots": ["6:00 PM"]},
-        }
-        tasks = _build_tasks("canlis", "2", avail)
-        assert len(tasks) == 1
-        assert tasks[0].month == "April"
-
-    def test_multiple_months(self):
-        avail = {
-            "March": {
-                "year": "2026",
-                "days": ["01", "15"],
-                "time_slots": ["5:00 PM", "9:00 PM"],
-            },
-            "April": {
-                "year": "2026",
-                "days": ["05"],
-                "time_slots": ["6:00 PM"],
-            },
+            "2026-03-01": {"time_slots": ["5:00 PM", "9:00 PM"]},
+            "2026-04-05": {"time_slots": ["6:00 PM"]},
         }
         tasks = _build_tasks("taneda", "4", avail)
-        assert len(tasks) == 2
-        months = {t.month for t in tasks}
-        assert months == {"March", "April"}
+        assert len(tasks) == 1
+        assert len(tasks[0].targets) == 2
+        dates = {tgt.date for tgt in tasks[0].targets}
+        assert dates == {"2026-03-01", "2026-04-05"}
 
     def test_invalid_time_slots_are_ignored(self):
         avail = {
-            "March": {
-                "year": "2026",
-                "days": ["01"],
-                "time_slots": ["garbage", "5:00 PM", "bad-time", "9:00 PM"],
-            }
+            "2026-03-01": {"time_slots": ["garbage", "5:00 PM", "bad-time", "9:00 PM"]},
         }
         tasks = _build_tasks("canlis", "2", avail)
-        t = tasks[0]
-        assert t.earliest_time == "5:00 PM"
-        assert t.latest_time == "9:00 PM"
+        tgt = tasks[0].targets[0]
+        assert tgt.earliest_time == "5:00 PM"
+        assert tgt.latest_time == "9:00 PM"
 
     def test_empty_availability_returns_no_tasks(self):
         tasks = _build_tasks("canlis", "2", {})
         assert tasks == []
+
+    def test_target_date_preserved(self):
+        avail = {
+            "2026-05-20": {"time_slots": ["7:00 PM"]},
+        }
+        tasks = _build_tasks("alinea", "2", avail)
+        assert tasks[0].targets[0].date == "2026-05-20"

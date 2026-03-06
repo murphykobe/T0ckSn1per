@@ -12,37 +12,50 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from models import Task
+from models import Task, Target
 from sniper import DayWorker
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-def _task(**overrides) -> Task:
-    defaults = dict(
-        url="canlis",
-        size="2",
-        year="2026",
-        month="March",
-        days=["15"],
-        earliest_time="5:00 PM",
-        latest_time="9:30 PM",
-    )
-    defaults.update(overrides)
-    return Task(**defaults)
+@pytest.fixture
+def task():
+    return Task(url="alinea", size="2", targets=[
+        Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:30 PM"),
+    ])
+
+@pytest.fixture
+def target(task):
+    return task.targets[0]
 
 
 def _make_slot_element(time_text: str) -> AsyncMock:
-    """Build a mock button.Consumer-resultsListItem element."""
-    span = AsyncMock()
-    span.inner_text = AsyncMock(return_value=time_text)
+    """
+    Build a mock search-result card element.
 
-    time_span = AsyncMock()
-    time_span.query_selector = AsyncMock(return_value=span)
+    The card has two child elements accessible via query_selector:
+      - [data-testid='search-result-time']       → time_el (returns time_text)
+      - button[data-testid='booking-card-button'] → book_btn (click tracked on slot.click)
+
+    slot.click is used as the book button's click so tests can assert on it.
+    """
+    time_el = AsyncMock()
+    time_el.inner_text = AsyncMock(return_value=time_text)
+
+    book_btn = AsyncMock()
 
     slot = AsyncMock()
-    slot.query_selector = AsyncMock(return_value=span)
-    slot.click = AsyncMock()
+
+    async def _query_selector(selector):
+        if "search-result-time" in selector:
+            return time_el
+        if "booking-card-button" in selector:
+            return book_btn
+        return None
+
+    slot.query_selector = _query_selector
+    # Expose book_btn.click as slot.click so test assertions work intuitively
+    slot.click = book_btn.click
     return slot
 
 
@@ -54,16 +67,45 @@ def _make_page(slots: list) -> AsyncMock:
     return page
 
 
-def _make_worker(task=None, page=None, dry_run=False) -> DayWorker:
-    task = task or _task()
+def _make_worker(task=None, target=None, page=None, dry_run=False) -> DayWorker:
+    if task is None:
+        task = Task(url="canlis", size="2", targets=[
+            Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:30 PM"),
+        ])
+    if target is None:
+        target = task.targets[0]
     page = page or _make_page([])
     return DayWorker(
         task=task,
-        day=task.days[0],
+        target=target,
         page=page,
         found_event=asyncio.Event(),
         dry_run=dry_run,
     )
+
+
+# ── New Target-based constructor tests ────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_day_worker_accepts_target(task, target):
+    page = MagicMock()
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event)
+    assert worker.target.date == "2026-03-15"
+    assert worker.checkout_url is None
+
+
+@pytest.mark.asyncio
+async def test_day_worker_try_day_uses_target_date(task, target):
+    page = AsyncMock()
+    page.query_selector = AsyncMock(return_value=None)
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event)
+    result = await worker._try_day()
+    assert result is False
+    call_args = page.query_selector.call_args[0][0]
+    assert "2026-03-15" in call_args
+    assert "consumer-calendar-day" in call_args
 
 
 # ── _try_time tests ───────────────────────────────────────────────────────────
@@ -170,9 +212,12 @@ class TestFoundEvent:
         """If found_event is already set, run() exits without polling."""
         page = AsyncMock()
         page.goto = AsyncMock()
-        task = _task()
+        task = Task(url="canlis", size="2", targets=[
+            Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:30 PM"),
+        ])
+        target = task.targets[0]
         event = asyncio.Event()
         event.set()  # already found by another worker
-        worker = DayWorker(task=task, day="15", page=page, found_event=event, dry_run=True)
+        worker = DayWorker(task=task, target=target, page=page, found_event=event, dry_run=True)
         await worker.run()
         page.goto.assert_not_awaited()
