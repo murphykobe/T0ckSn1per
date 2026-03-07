@@ -259,3 +259,10 @@ async def test_wait_for_release_past_time():
     from sniper import _wait_for_release
     # Use a time in the past (00:00 is always past during the day)
     await _wait_for_release("00:00")  # Should return immediately, not sleep
+
+
+@pytest.mark.asyncio
+async def test_snipe_all_empty_returns_empty_list():
+    from sniper import snipe_all
+    results = await snipe_all([])
+    assert results == []

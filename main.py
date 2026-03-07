@@ -43,7 +43,9 @@ log = logging.getLogger("main")
 
 def _print_results(results: list, json_mode: bool) -> None:
     import json as _json
-    any_success = any(r.get("status") == "success" for r in results)
+    has_success = any(r.get("status") == "success" for r in results)
+    has_error   = any(r.get("status") == "error" for r in results)
+
     if json_mode:
         output = results[0] if len(results) == 1 else results
         print(_json.dumps(output))
@@ -58,9 +60,17 @@ def _print_results(results: list, json_mode: bool) -> None:
                     f"  Checkout   : {r.get('checkout_url', 'N/A')}\n"
                     f"{'='*60}\n"
                 )
+            elif r["status"] == "error":
+                print(f"[{r['restaurant']}] Error: {r.get('error', 'unknown')}", file=sys.stderr)
             else:
                 print(f"[{r['restaurant']}] No slot found.", file=sys.stderr)
-    sys.exit(0 if any_success else 1)
+
+    if has_success:
+        sys.exit(0)
+    elif has_error:
+        sys.exit(2)
+    else:
+        sys.exit(1)
 
 
 # ── Subcommand handlers ───────────────────────────────────────────────────────
