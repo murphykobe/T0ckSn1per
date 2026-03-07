@@ -47,7 +47,7 @@ def _print_results(results: list, json_mode: bool) -> None:
     has_error   = any(r.get("status") == "error" for r in results)
 
     if json_mode:
-        output = results[0] if len(results) == 1 else results
+        output = results[0] if len(results) == 1 else (results if results else {})
         print(_json.dumps(output))
     else:
         for r in results:
