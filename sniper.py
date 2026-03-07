@@ -48,16 +48,10 @@ CHROME_EXECUTABLE = os.environ.get("CHROME_EXECUTABLE") or None
 # Set PLAYWRIGHT_HEADLESS=1 in environments without a display (CI, containers)
 HEADLESS = os.environ.get("PLAYWRIGHT_HEADLESS", "0") == "1"
 
-REFRESH_DELAY_SEC  = float(os.environ.get("REFRESH_DELAY_SEC", "1.0"))
-JITTER_SEC         = 0.3       # ± random jitter on top of REFRESH_DELAY_SEC
 PAGE_LOAD_TIMEOUT  = 15_000    # ms
 SLOT_WAIT_TIMEOUT  = 8_000     # ms — wait for time slots after clicking a day
 BROWSER_HOLD_SEC   = 600       # keep browser alive after securing cart (10 min)
 LAUNCH_STAGGER_SEC = 0.5       # delay between spinning up worker tabs
-
-ENABLE_LOGIN   = False
-TOCK_USERNAME  = os.environ.get("TOCK_USERNAME", "")
-TOCK_PASSWORD  = os.environ.get("TOCK_PASSWORD", "")
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -273,7 +267,6 @@ async def _load_cookies(context: BrowserContext, cookies_file: str) -> None:
 
 async def _interactive_login(context: BrowserContext, page_load_timeout: int) -> None:
     """Open Tock login page and wait for the user to log in manually."""
-    import sys
     page = await context.new_page()
     await _apply_stealth(page)
     await page.goto("https://www.exploretock.com/login", timeout=page_load_timeout)
@@ -331,18 +324,6 @@ async def _prompt_and_login(page: Page, restaurant_slug: str) -> None:
     except Exception as e:
         log.warning("Login attempt failed: %s", e)
         print(f"[AUTH] Login failed ({e}). Log in manually.", file=sys.stderr)
-
-
-# ── Login ─────────────────────────────────────────────────────────────────────
-
-async def _login(page: Page) -> None:
-    log.info("Logging into Tock...")
-    await page.goto("https://www.exploretock.com/login", timeout=PAGE_LOAD_TIMEOUT)
-    await page.fill("input[name='email']",    TOCK_USERNAME)
-    await page.fill("input[name='password']", TOCK_PASSWORD)
-    await page.click(".Button")
-    await page.wait_for_selector(".MainHeader-accountName", timeout=PAGE_LOAD_TIMEOUT)
-    log.info("Login successful")
 
 
 # ── Release-time scheduler ────────────────────────────────────────────────────
@@ -409,13 +390,6 @@ async def snipe_task(
             _launch_kwargs["executable_path"] = CHROME_EXECUTABLE
         browser: Browser = await p.chromium.launch(**_launch_kwargs)
         context: BrowserContext = await browser.new_context(user_agent=USER_AGENT)
-
-        # Optional login (shared session across all tabs)
-        if ENABLE_LOGIN:
-            login_page = await context.new_page()
-            await _apply_stealth(login_page)
-            await _login(login_page)
-            await login_page.close()
 
         if cookies_file:
             await _load_cookies(context, cookies_file)
