@@ -266,3 +266,22 @@ async def test_snipe_all_empty_returns_empty_list():
     from sniper import snipe_all
     results = await snipe_all([])
     assert results == []
+
+
+# ── prompt_login flag ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_day_worker_stores_prompt_login(task, target):
+    """DayWorker stores prompt_login flag."""
+    page = MagicMock()
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event, prompt_login=True)
+    assert worker.prompt_login is True
+
+@pytest.mark.asyncio
+async def test_day_worker_prompt_login_default_false(task, target):
+    """DayWorker prompt_login defaults to False."""
+    page = MagicMock()
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event)
+    assert worker.prompt_login is False
