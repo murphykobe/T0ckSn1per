@@ -174,7 +174,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_snipe.add_argument("--login", action="store_true",
                          help="Perform interactive browser login before sniping")
     p_snipe.add_argument("--prompt-login", action="store_true",
-                         help="Prompt for credentials at startup")
+                         help="After cart add, prompt for Tock credentials to tie cart to your account")
     p_snipe.add_argument("--json", action="store_true",
                          help="Output result as JSON on stdout")
 
