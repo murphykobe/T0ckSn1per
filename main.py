@@ -57,6 +57,7 @@ def _print_results(results: list, json_mode: bool) -> None:
                     f"  SLOT SECURED — complete checkout in your browser!\n"
                     f"  Restaurant : {r['restaurant']}\n"
                     f"  Date       : {r['date']}\n"
+                    f"  Time       : {r.get('time', 'N/A')}\n"
                     f"  Checkout   : {r.get('checkout_url', 'N/A')}\n"
                     f"{'='*60}\n"
                 )
@@ -112,6 +113,7 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
         interval=args.interval,
         max_duration=args.max_duration,
         release_at=getattr(args, "release_at", None),
+        timezone=getattr(args, "timezone", None),
         cookies_file=getattr(args, "cookies_file", None),
         interactive_login=getattr(args, "login", False),
         prompt_login=getattr(args, "prompt_login", False),
