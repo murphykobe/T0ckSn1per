@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from recon import recon
 from sniper import DayWorker, CHROME_EXECUTABLE, HEADLESS, USER_AGENT
-from models import Task
+from models import Task, Target
 from tests.integration.conftest import TEST_SLUG, TEST_SIZE, tock_search_url
 
 PAGE_LOAD_TIMEOUT  = 20_000  # ms
@@ -121,12 +121,12 @@ async def test_reservation_added_to_cart():
             "try a different slug with TEST_TOCK_SLUG=<slug>"
         )
 
-    # Use only the first task, first available day to keep the test fast
-    task = tasks[0]
-    day  = task.days[0]
+    # Use only the first task, first available target to keep the test fast
+    task   = tasks[0]
+    target = task.targets[0]
 
-    print(f"\n[e2e] Target: {task.url} | {task.month} {day} {task.year} "
-          f"| party {task.size} | {task.earliest_time}–{task.latest_time}")
+    print(f"\n[e2e] Target: {task.url} | {target.date} "
+          f"| party {task.size} | {target.earliest_time}–{target.latest_time}")
 
     # ── Step 2: open a browser and poll until a slot is clicked ──────────────
     cart_selector_found = None
@@ -144,7 +144,7 @@ async def test_reservation_added_to_cart():
         found_event = asyncio.Event()
         worker = DayWorker(
             task=task,
-            day=day,
+            target=target,
             page=page,
             found_event=found_event,
             dry_run=False,   # real click — this is the exit-criteria test
@@ -161,7 +161,7 @@ async def test_reservation_added_to_cart():
         if not clicked:
             await browser.close()
             pytest.skip(
-                f"Day {day} not available during polling window — "
+                f"Date {target.date} not available during polling window — "
                 "availability may have disappeared between recon and snipe"
             )
 
@@ -176,7 +176,7 @@ async def test_reservation_added_to_cart():
     print(f"[e2e] Cart signal matched  : {cart_signal!r}")
 
     assert cart_signal is not None, (
-        f"Book button was clicked for {task.url} on {task.month} {day}, "
+        f"Book button was clicked for {task.url} on {target.date}, "
         f"but no checkout page appeared.\n"
         f"URL after click: {winning_url}\n"
         f"Signals tried: {CART_SIGNALS}\n"
