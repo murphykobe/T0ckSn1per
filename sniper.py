@@ -25,8 +25,8 @@ import logging
 import os
 import random
 import sys
-import time as _time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import List, Optional
 
 from playwright.async_api import (
@@ -102,6 +102,7 @@ class DayWorker:
         self.interval     = interval
         self.prompt_login = prompt_login
         self.checkout_url: Optional[str] = None
+        self.matched_time: Optional[str] = None
 
     async def run(self) -> None:
         log.info(
@@ -210,6 +211,7 @@ class DayWorker:
                     if not book_btn:
                         continue
                     log.info("[%s/%s] Clicking slot %s", self.task.url, self.target.date, time_text)
+                    self.matched_time = time_text
                     if not self.dry_run:
                         await book_btn.click()
                         try:
@@ -345,22 +347,24 @@ async def _login(page: Page) -> None:
 
 # ── Release-time scheduler ────────────────────────────────────────────────────
 
-async def _wait_for_release(release_at: str) -> None:
-    """Sleep until release_at HH:MM (local time, 24h). Pre-warms 30s before."""
+async def _wait_for_release(release_at: str, timezone: str = None) -> None:
+    """Sleep until release_at HH:MM (24h). Uses *timezone* if provided, else local time. Pre-warms 30s before."""
     try:
-        now = datetime.now()
+        tz = ZoneInfo(timezone) if timezone else None
+        now = datetime.now(tz=tz)
         target = datetime.strptime(release_at, "%H:%M").replace(
-            year=now.year, month=now.month, day=now.day
+            year=now.year, month=now.month, day=now.day,
+            tzinfo=tz,
         )
     except ValueError:
         log.error("Invalid --release-at format '%s'. Use HH:MM (24h), e.g. '10:00'", release_at)
         return
 
-    if target <= datetime.now():
+    if target <= datetime.now(tz=tz):
         log.info("Release time %s already passed — firing immediately.", release_at)
         return
 
-    pre_warm_secs = (target.timestamp() - 30) - _time.time()
+    pre_warm_secs = (target - datetime.now(tz=tz)).total_seconds() - 30
     if pre_warm_secs > 0:
         log.info(
             "Sleeping %.0fs until pre-warm window (30s before %s)...",
@@ -368,7 +372,7 @@ async def _wait_for_release(release_at: str) -> None:
         )
         await asyncio.sleep(pre_warm_secs)
 
-    remaining = target.timestamp() - _time.time()
+    remaining = (target - datetime.now(tz=tz)).total_seconds()
     if remaining > 0:
         log.info("Waiting %.1fs for release at %s — get ready!", remaining, release_at)
         await asyncio.sleep(remaining)
@@ -384,6 +388,7 @@ async def snipe_task(
     interval: float = 30.0,
     max_duration: float = 0,
     release_at=None,
+    timezone: str = None,
     cookies_file=None,
     interactive_login: bool = False,
     prompt_login: bool = False,
@@ -418,7 +423,7 @@ async def snipe_task(
             await _interactive_login(context, PAGE_LOAD_TIMEOUT)
 
         if release_at:
-            await _wait_for_release(release_at)
+            await _wait_for_release(release_at, timezone=timezone)
 
         # Open one tab per target
         workers: List[DayWorker] = []
@@ -456,6 +461,7 @@ async def snipe_task(
     return {
         "restaurant":   task.url,
         "date":         winning_worker.target.date,
+        "time":         winning_worker.matched_time or "",
         "checkout_url": winning_worker.checkout_url or "",
     }
 
@@ -479,6 +485,7 @@ async def snipe_all(tasks: List[Task], **kwargs) -> List[dict]:
                 "restaurant": task.url,
                 "error": str(outcome),
                 "date": "",
+                "time": "",
                 "checkout_url": "",
             })
         elif outcome:
@@ -490,6 +497,7 @@ async def snipe_all(tasks: List[Task], **kwargs) -> List[dict]:
                 "status": "no_slots",
                 "restaurant": task.url,
                 "date": "",
+                "time": "",
                 "checkout_url": "",
             })
     return results
