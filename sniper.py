@@ -409,25 +409,24 @@ async def snipe_task(
                 await asyncio.sleep(LAUNCH_STAGGER_SEC)
 
         # Run all workers concurrently
+        timed_out = False
         gather_coro = asyncio.gather(*[w.run() for w in workers], return_exceptions=True)
         if max_duration > 0:
             try:
                 await asyncio.wait_for(gather_coro, timeout=max_duration * 60)
             except asyncio.TimeoutError:
                 log.info("[%s] max-duration %.0fmin reached — stopping.", task.url, max_duration)
+                timed_out = True
                 found_event.set()  # signal all workers to stop their loops
         else:
             await gather_coro
 
         await browser.close()
 
-    if not found_event.is_set():
-        return None
-
-    # Find the winning worker (the one that captured a checkout URL, or any that fired the event)
+    # Check if any worker actually found a slot (not just timed out)
     winning_worker = next(
         (w for w in workers if w.checkout_url is not None),
-        workers[0] if workers else None,
+        None,
     )
     if winning_worker is None:
         return None
