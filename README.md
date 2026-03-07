@@ -53,11 +53,10 @@ Sample output:
   {
     "url": "canlis",
     "size": "2",
-    "year": "2026",
-    "month": "March",
-    "days": ["14", "21", "28"],
-    "earliest_time": "5:30 PM",
-    "latest_time": "9:00 PM"
+    "targets": [
+      {"date": "2026-03-14", "earliest_time": "5:00 PM", "latest_time": "9:30 PM"},
+      {"date": "2026-03-21", "earliest_time": "5:00 PM", "latest_time": "9:30 PM"}
+    ]
   }
 ]
 ```
@@ -66,16 +65,24 @@ If `ANTHROPIC_API_KEY` is set, Claude will refine the time window. Otherwise a b
 
 ---
 
-### `snipe` — snipe from a saved config
+### `snipe` — snipe from a saved config or inline targets
 
-Loads a JSON config from `recon` and starts polling immediately.
+Loads a JSON config from `recon`, or accepts inline `--target` flags, and starts polling immediately.
 
 ```bash
-# Live snipe (clicks real slots)
+# Live snipe from a config file
 python main.py snipe --config canlis.json
+
+# Inline targets (no config file needed)
+python main.py snipe canlis \
+  --target 2026-03-14 "5:00 PM" "9:30 PM" 2 \
+  --target 2026-03-21 "5:00 PM" "9:30 PM" 2
 
 # Dry-run: finds slots but does not click them
 python main.py snipe --config canlis.json --dry-run
+
+# Output structured JSON on stdout
+python main.py snipe --config canlis.json --json
 ```
 
 When a slot is secured the browser stays open for **10 minutes** — complete checkout manually before Tock releases the hold.
@@ -109,7 +116,7 @@ main.py  (CLI)
    │
    └─ sniper.py  ── opens one browser per Task
                     opens one tab per target day, all polling concurrently
-                    each tab polls on a randomised interval (default 1 s ± 300 ms)
+                    each tab polls on a randomised interval (default 30 s ± 10% jitter)
                     first tab to find + click a slot:
                       1. sets a shared asyncio.Event → all other tabs stop
                       2. fires notifications (console banner + desktop popup + bell)
@@ -134,12 +141,27 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 |-----------------------|--------------------------------|--------------------------------------------------------|
 | `PLAYWRIGHT_HEADLESS` | `0`                            | Set to `1` for headless mode (CI / no display)         |
 | `CHROME_EXECUTABLE`   | Playwright's bundled Chromium  | Path to a custom Chrome binary                         |
-| `REFRESH_DELAY_SEC`   | `1.0`                          | Base seconds between poll cycles per tab               |
 | `ANTHROPIC_API_KEY`   | —                              | Enables Claude-assisted time-window refinement in recon|
-| `TOCK_USERNAME`       | —                              | Tock account email (only needed if `ENABLE_LOGIN=True`)|
-| `TOCK_PASSWORD`       | —                              | Tock account password                                  |
 
-> **Login:** set `ENABLE_LOGIN = True` in `sniper.py` and export `TOCK_USERNAME` / `TOCK_PASSWORD`. The login is shared across all tabs in the same browser context.
+---
+
+## CLI Flags
+
+### `snipe` subcommand
+
+| Flag              | Description                                                        |
+|-------------------|--------------------------------------------------------------------|
+| `--target DATE EARLIEST LATEST SIZE` | Inline target (repeatable). Example: `--target 2026-03-14 "5:00 PM" "9:30 PM" 2` |
+| `--config FILE`   | JSON config file from `recon`                                      |
+| `--interval SECONDS` | Poll interval in seconds (default: 30)                          |
+| `--max-duration MINUTES` | Stop after this many minutes (0 = unlimited)                |
+| `--release-at HH:MM` | Start sniping at this time of day                               |
+| `--timezone TZ`   | Timezone for `--release-at` (e.g. `America/Chicago`)               |
+| `--cookies-file FILE` | Path to Netscape cookies file for authentication               |
+| `--login`         | Perform interactive browser login before sniping                   |
+| `--prompt-login`  | Prompt for Tock credentials at startup                             |
+| `--json`          | Output result as JSON on stdout                                    |
+| `--dry-run`       | Find slots but do not click them                                   |
 
 ---
 
