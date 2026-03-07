@@ -92,13 +92,15 @@ class DayWorker:
         found_event: asyncio.Event,
         dry_run: bool = False,
         interval: float = 30.0,
+        prompt_login: bool = False,
     ):
-        self.task        = task
-        self.target      = target
-        self.page        = page
-        self.found_event = found_event
-        self.dry_run     = dry_run
-        self.interval    = interval
+        self.task         = task
+        self.target       = target
+        self.page         = page
+        self.found_event  = found_event
+        self.dry_run      = dry_run
+        self.interval     = interval
+        self.prompt_login = prompt_login
         self.checkout_url: Optional[str] = None
 
     async def run(self) -> None:
@@ -121,6 +123,8 @@ class DayWorker:
                         f"  Window   : {self.target.earliest_time} – {self.target.latest_time}"
                     )
                     notify_user(msg, hold_minutes=BROWSER_HOLD_SEC // 60)
+                    if self.prompt_login and not self.dry_run:
+                        await _prompt_and_login(self.page, self.task.url)
                     if not self.dry_run:
                         log.info(
                             "[%s/%s] Holding browser for %ds — finish checkout now!",
@@ -286,6 +290,47 @@ async def _interactive_login(context: BrowserContext, page_load_timeout: int) ->
     await page.close()
 
 
+async def _prompt_and_login(page: Page, restaurant_slug: str) -> None:
+    """After cart add: prompt for Tock credentials via stdin and log in."""
+    print(
+        f"\n[AUTH] Slot secured! To tie this cart to your Tock account:\n"
+        f"  Enter credentials below (or Ctrl+C to skip).\n"
+        f"  Alternatively, open exploretock.com/{restaurant_slug} in your browser\n"
+        f"  and log in — the cart will be waiting there.\n",
+        file=sys.stderr,
+    )
+    try:
+        import getpass
+        email    = input("  Tock email: ")
+        password = getpass.getpass("  Tock password: ")
+    except (KeyboardInterrupt, EOFError):
+        print("\n[AUTH] Skipped — log in manually to complete checkout.", file=sys.stderr)
+        return
+
+    if not email.strip() or not password:
+        print("[AUTH] No credentials entered — skipping.", file=sys.stderr)
+        return
+
+    try:
+        await page.goto("https://www.exploretock.com/login", timeout=PAGE_LOAD_TIMEOUT)
+        await page.fill("input[name='email']",    email.strip())
+        await page.fill("input[name='password']", password)
+        await page.click("button[type='submit']")
+        try:
+            await page.wait_for_url(
+                lambda url: "/login" not in url,
+                timeout=15_000,
+            )
+        except Exception:
+            pass
+        checkout = f"https://www.exploretock.com/{restaurant_slug}"
+        log.info("Login complete. Cart available at: %s", checkout)
+        print(f"\n[AUTH] Logged in! Cart ready at: {checkout}", file=sys.stderr)
+    except Exception as e:
+        log.warning("Login attempt failed: %s", e)
+        print(f"[AUTH] Login failed ({e}). Log in manually.", file=sys.stderr)
+
+
 # ── Login ─────────────────────────────────────────────────────────────────────
 
 async def _login(page: Page) -> None:
@@ -380,7 +425,7 @@ async def snipe_task(
         for i, target in enumerate(task.targets):
             page = await context.new_page()
             await _apply_stealth(page)
-            workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run, interval=interval))
+            workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run, interval=interval, prompt_login=prompt_login))
             if i < len(task.targets) - 1:
                 await asyncio.sleep(LAUNCH_STAGGER_SEC)
 
