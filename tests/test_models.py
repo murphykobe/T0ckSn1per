@@ -23,6 +23,19 @@ def test_target_search_url():
     assert "size=2" in url
 
 
+def test_target_search_url_uses_midpoint_time():
+    """Search URL time param should reflect target window midpoint, not hardcoded 19:00."""
+    lunch = Target(date="2026-03-15", earliest_time="11:00 AM", latest_time="2:00 PM")
+    url = lunch.search_url("canlis", "2")
+    # Midpoint of 11:00 AM (11:00) - 2:00 PM (14:00) = 12:30
+    assert "time=12%3A30" in url, f"Expected midpoint time in URL, got: {url}"
+
+    dinner = Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:00 PM")
+    url = dinner.search_url("canlis", "2")
+    # Midpoint of 5:00 PM (17:00) - 9:00 PM (21:00) = 19:00
+    assert "time=19%3A00" in url, f"Expected midpoint time in URL, got: {url}"
+
+
 def test_task_from_dict_roundtrip():
     data = {
         "url": "alinea",
