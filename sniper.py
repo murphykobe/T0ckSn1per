@@ -418,9 +418,6 @@ async def snipe_task(
         if interactive_login:
             await _interactive_login(context, PAGE_LOAD_TIMEOUT)
 
-        if release_at:
-            await _wait_for_release(release_at, timezone=timezone)
-
         # Open one tab per target
         workers: List[DayWorker] = []
         for i, target in enumerate(task.targets):
@@ -429,6 +426,21 @@ async def snipe_task(
             workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run, interval=interval, prompt_login=prompt_login))
             if i < len(task.targets) - 1:
                 await asyncio.sleep(LAUNCH_STAGGER_SEC)
+
+        # Pre-warm all pages in release mode so they're loaded before the countdown ends
+        if release_at:
+            log.info("[%s] Pre-warming %d worker pages...", task.url, len(workers))
+            for w in workers:
+                try:
+                    await w.page.goto(
+                        w.target.search_url(task.url, task.size),
+                        wait_until="domcontentloaded",
+                        timeout=PAGE_LOAD_TIMEOUT,
+                    )
+                except Exception as e:
+                    log.warning("[%s/%s] Pre-warm failed: %s", task.url, w.target.date, e)
+
+            await _wait_for_release(release_at, timezone=timezone)
 
         # Run all workers concurrently
         timed_out = False
