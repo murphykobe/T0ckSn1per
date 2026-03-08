@@ -225,7 +225,11 @@ def main() -> None:
         "snipe": _cmd_snipe,
         "run":   _cmd_run,
     }
-    asyncio.run(dispatch[args.command](args))
+    try:
+        asyncio.run(dispatch[args.command](args))
+    except KeyboardInterrupt:
+        print("\n[t0cksn1per] Interrupted — shutting down.", file=sys.stderr)
+        sys.exit(130)  # 128 + SIGINT(2)
 
 
 if __name__ == "__main__":
