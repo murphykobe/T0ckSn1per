@@ -212,14 +212,32 @@ class DayWorker:
                     self.matched_time = time_text
                     if not self.dry_run:
                         await book_btn.click()
+                        cart_confirmed = False
                         try:
                             await self.page.wait_for_url("**/checkout/**", timeout=8000)
+                            cart_confirmed = True
                         except PWTimeout:
-                            pass
-                        self.checkout_url = self.page.url
+                            # Fallback checks per PRD FR-8
+                            holding = await self.page.query_selector("[data-testid='holding-time']")
+                            if holding:
+                                cart_confirmed = True
+                            else:
+                                complete_el = await self.page.query_selector("text='Complete your reservation'")
+                                if complete_el:
+                                    cart_confirmed = True
+
+                        if cart_confirmed:
+                            self.checkout_url = self.page.url
+                            return True
+                        else:
+                            log.warning(
+                                "[%s/%s] Clicked slot %s but cart add not confirmed — retrying next cycle",
+                                self.task.url, self.target.date, time_text,
+                            )
+                            return False
                     else:
                         self.checkout_url = "(dry-run)"
-                    return True
+                        return True
         except PWTimeout:
             log.debug("[%s/%s] No search-result cards loaded", self.task.url, self.target.date)
         except Exception as e:

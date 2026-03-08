@@ -204,6 +204,23 @@ class TestTryTime:
         worker = _make_worker(page=page)
         assert await worker._try_time() is False
 
+    @pytest.mark.asyncio
+    async def test_rejects_failed_cart_add(self):
+        """_try_time returns False when checkout URL doesn't confirm cart."""
+        from playwright.async_api import TimeoutError as PWTimeout
+        slot = _make_slot_element("6:00 PM")
+        page = _make_page([slot])
+        # After clicking, URL stays on search page (cart add failed)
+        page.url = "https://www.exploretock.com/alinea/search?date=2026-03-15"
+        page.wait_for_url = AsyncMock(side_effect=PWTimeout("timeout"))
+        # No holding-time element, no "Complete your reservation" text
+        page.query_selector = AsyncMock(return_value=None)
+
+        worker = _make_worker(page=page)
+        result = await worker._try_time()
+        assert result is False, "Should reject when cart add is not confirmed"
+        assert worker.checkout_url is None
+
 
 # ── found_event propagation ───────────────────────────────────────────────────
 
