@@ -106,9 +106,6 @@ class DayWorker:
         )
         try:
             while not self.found_event.is_set():
-                jitter = random.uniform(-min(self.interval * 0.1, 2.0), min(self.interval * 0.1, 2.0))
-                delay = max(0.5, self.interval + jitter)
-                await asyncio.sleep(delay)
                 if await self._poll():
                     self.found_event.set()
                     msg = (
@@ -127,6 +124,13 @@ class DayWorker:
                         )
                         await asyncio.sleep(BROWSER_HOLD_SEC)
                     break
+                # Sleep between polls (not before the first one)
+                jitter = random.uniform(
+                    -min(self.interval * 0.1, 2.0),
+                    min(self.interval * 0.1, 2.0),
+                )
+                delay = max(0.5, self.interval + jitter)
+                await asyncio.sleep(delay)
         except asyncio.CancelledError:
             pass
         except Exception as exc:

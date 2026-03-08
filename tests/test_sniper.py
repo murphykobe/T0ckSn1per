@@ -6,6 +6,7 @@ these tests run instantly without launching Chrome.
 """
 
 import asyncio
+import time
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -285,3 +286,25 @@ async def test_day_worker_prompt_login_default_false(task, target):
     event = asyncio.Event()
     worker = DayWorker(task=task, target=target, page=page, found_event=event)
     assert worker.prompt_login is False
+
+
+@pytest.mark.asyncio
+async def test_day_worker_polls_immediately_first_iteration(task, target):
+    """DayWorker should not sleep before its first poll attempt."""
+    page = AsyncMock()
+    page.goto = AsyncMock()
+    page.wait_for_selector = AsyncMock(side_effect=Exception("stop"))
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event, interval=30.0)
+
+    start = time.monotonic()
+    # Run worker briefly — it should attempt _poll almost immediately, not after 30s
+    try:
+        await asyncio.wait_for(worker.run(), timeout=2.0)
+    except asyncio.TimeoutError:
+        pass
+    elapsed = time.monotonic() - start
+
+    # Worker should have called page.goto (attempted a poll) within 2 seconds
+    assert page.goto.called, "Worker never attempted to poll"
+    assert elapsed < 3.0, f"Worker took {elapsed:.1f}s — should poll immediately, not sleep first"
