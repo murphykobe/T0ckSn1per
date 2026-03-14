@@ -325,3 +325,138 @@ async def test_day_worker_polls_immediately_first_iteration(task, target):
     # Worker should have called page.goto (attempted a poll) within 2 seconds
     assert page.goto.called, "Worker never attempted to poll"
     assert elapsed < 3.0, f"Worker took {elapsed:.1f}s — should poll immediately, not sleep first"
+
+
+# ── _extract_next_data tests ─────────────────────────────────────────────────
+
+import json
+
+class TestExtractNextData:
+    @pytest.mark.asyncio
+    async def test_returns_slots_from_pageprops(self):
+        """Extracts times from pageProps.availabilities path; ISO datetimes convert correctly."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T17:00"},
+                        {"dateTime": "2026-03-15T19:30"},
+                        {"dateTime": "2026-03-15T21:00"},
+                    ]
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "5:00 PM" in result
+        assert "7:30 PM" in result
+        assert "9:00 PM" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_next_data_element(self):
+        """page.evaluate returns None → returns None."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=None)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_slots_found(self):
+        """__NEXT_DATA__ exists but no availability keys → returns None."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "restaurantName": "Alinea",
+                    "someOtherKey": 123,
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_handles_iso_datetime_format(self):
+        """ISO datetime 2026-03-15T14:00 → 2:00 PM."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "availability": [
+                        {"startTime": "2026-03-15T14:00"},
+                    ]
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "2:00 PM" in result
+
+    @pytest.mark.asyncio
+    async def test_handles_nested_arrays(self):
+        """Finds slots inside nested dict values that are arrays."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "searchResults": {
+                        "results": [
+                            {"time": "17:00"},
+                            {"nested": {"time": "19:00"}},
+                        ]
+                    }
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "5:00 PM" in result
+        assert "7:00 PM" in result
+
+    @pytest.mark.asyncio
+    async def test_handles_evaluate_exception(self):
+        """page.evaluate throws → returns None gracefully."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(side_effect=Exception("browser crashed"))
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_dehydrated_state_path(self):
+        """Extracts from dehydratedState.queries[0].state.data."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "dehydratedState": {
+                        "queries": [
+                            {
+                                "state": {
+                                    "data": [
+                                        {"startTime": "2026-03-15T18:00"},
+                                        {"startTime": "2026-03-15T20:30"},
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "6:00 PM" in result
+        assert "8:30 PM" in result
