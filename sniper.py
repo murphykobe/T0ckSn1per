@@ -282,39 +282,38 @@ class DayWorker:
         except (AttributeError, TypeError):
             return None
 
-        # Search candidate paths for availability data
-        subtree = None
+        # Collect candidates from all known paths (scan all, not first-match)
+        candidates: list = []
 
         # Direct keys under pageProps
         for key in self._AVAILABILITY_KEYS:
-            if key in page_props:
-                subtree = page_props[key]
-                break
+            val = page_props.get(key)
+            if val is not None:
+                candidates.append(val)
 
         # initialData.availability / initialData.searchResults
-        if subtree is None:
-            initial = page_props.get("initialData")
-            if isinstance(initial, dict):
-                for key in ("availability", "searchResults"):
-                    if key in initial:
-                        subtree = initial[key]
-                        break
+        initial = page_props.get("initialData")
+        if isinstance(initial, dict):
+            for key in ("availability", "searchResults"):
+                val = initial.get(key)
+                if val is not None:
+                    candidates.append(val)
 
         # dehydratedState.queries[0].state.data (React Query hydration)
-        if subtree is None:
-            dehydrated = page_props.get("dehydratedState")
-            if isinstance(dehydrated, dict):
-                queries = dehydrated.get("queries")
-                if isinstance(queries, list) and queries:
-                    state = queries[0].get("state", {}) if isinstance(queries[0], dict) else {}
-                    if "data" in state:
-                        subtree = state["data"]
+        dehydrated = page_props.get("dehydratedState")
+        if isinstance(dehydrated, dict):
+            queries = dehydrated.get("queries")
+            if isinstance(queries, list) and queries:
+                state = queries[0].get("state", {}) if isinstance(queries[0], dict) else {}
+                if "data" in state:
+                    candidates.append(state["data"])
 
-        if subtree is None:
+        if not candidates:
             return None
 
         times: list = []
-        self._collect_times(subtree, times)
+        for candidate in candidates:
+            self._collect_times(candidate, times)
 
         if not times:
             return None
@@ -362,7 +361,7 @@ class DayWorker:
                 dt = datetime.strptime(raw, "%I:%M %p")
                 return dt.strftime("%-I:%M %p")
             except ValueError:
-                return raw  # best-effort passthrough
+                return None
 
         # ISO datetime (contains 'T')
         if 'T' in raw:
