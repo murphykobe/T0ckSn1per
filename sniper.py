@@ -87,6 +87,16 @@ def _collect_times_from_tree(obj, out: list) -> None:
             _collect_times_from_tree(item, out)
 
 
+# JavaScript snippet to extract __NEXT_DATA__ from a Next.js page.
+# Shared between sniper and recon modules.
+NEXT_DATA_JS = """() => {
+    const el = document.querySelector('#__NEXT_DATA__');
+    if (!el) return null;
+    try { return JSON.parse(el.textContent); }
+    catch { return null; }
+}"""
+
+
 def _format_time_str(raw: str) -> Optional[str]:
     """Convert a raw time string to 'H:MM AM/PM' format.
 
@@ -410,14 +420,7 @@ class DayWorker:
         no data could be extracted.
         """
         try:
-            raw = await self.page.evaluate(
-                """() => {
-                    const el = document.querySelector('#__NEXT_DATA__');
-                    if (!el) return null;
-                    try { return JSON.parse(el.textContent); }
-                    catch { return null; }
-                }"""
-            )
+            raw = await self.page.evaluate(NEXT_DATA_JS)
         except Exception:
             return None
         return _parse_next_data_json(raw)
