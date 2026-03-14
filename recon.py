@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
 
 from models import Task, Target, RESERVATION_TIME_FORMAT
+from sniper import _parse_next_data_json
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +85,23 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
             log.info("[recon] Loading %s", url)
             await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
 
+            # Try __NEXT_DATA__ extraction as supplementary data source
+            nd_slots = None
+            try:
+                next_data = await page.evaluate(
+                    """() => {
+                        const el = document.querySelector('#__NEXT_DATA__');
+                        if (!el) return null;
+                        try { return JSON.parse(el.textContent); }
+                        catch { return null; }
+                    }"""
+                )
+                nd_slots = _parse_next_data_json(next_data)
+                if nd_slots:
+                    log.info("[recon] __NEXT_DATA__ found %d slot(s)", len(nd_slots))
+            except Exception:
+                pass
+
             # Wait for calendar + extra settle time for React to render day buttons
             try:
                 await page.wait_for_selector("div.ConsumerCalendar-month", timeout=PAGE_LOAD_TIMEOUT_MS)
@@ -136,6 +154,11 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
                     log.debug("[recon] No search-result cards loaded for %s", date_str)
                 except Exception as e:
                     log.debug("[recon] Error fetching time slots: %s", e)
+
+                # Fall back to __NEXT_DATA__ slots if DOM scraping yielded nothing
+                if not time_slots and nd_slots:
+                    log.info("[recon] %s: using __NEXT_DATA__ slots as fallback", date_str)
+                    time_slots = list(nd_slots)
 
                 result[date_str] = {"time_slots": time_slots}
 
