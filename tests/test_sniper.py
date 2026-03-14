@@ -535,3 +535,45 @@ class TestPollWithNextData:
 
         assert result is True
         worker._try_day.assert_awaited_once()
+
+
+# ── _any_slot_in_window tests ────────────────────────────────────────────────
+
+class TestAnySlotInWindow:
+    """Test _any_slot_in_window() boundary logic."""
+
+    def test_slot_in_window(self):
+        worker = _make_worker()  # window 5:00 PM - 9:30 PM
+        assert worker._any_slot_in_window(["7:00 PM"]) is True
+
+    def test_slot_at_earliest_boundary(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["5:00 PM"]) is True
+
+    def test_slot_at_latest_boundary(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["9:30 PM"]) is True
+
+    def test_slot_before_window(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["4:59 PM"]) is False
+
+    def test_slot_after_window(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["9:31 PM"]) is False
+
+    def test_mixed_slots_one_match(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["3:00 PM", "10:00 PM", "6:00 PM"]) is True
+
+    def test_empty_list(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window([]) is False
+
+    def test_unparseable_times_skipped(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["garbage", "not-a-time"]) is False
+
+    def test_unparseable_mixed_with_valid(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["garbage", "7:00 PM"]) is True
