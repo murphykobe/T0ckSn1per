@@ -460,3 +460,78 @@ class TestExtractNextData:
         assert result is not None
         assert "6:00 PM" in result
         assert "8:30 PM" in result
+
+
+# ── _poll() with __NEXT_DATA__ pre-filter tests ─────────────────────────────
+
+class TestPollWithNextData:
+    @pytest.mark.asyncio
+    async def test_poll_skips_dom_when_next_data_has_no_matching_slots(self):
+        """__NEXT_DATA__ returns slots but none in window -> _try_day NOT called, returns False."""
+        page = AsyncMock()
+        page.goto = AsyncMock()
+        # __NEXT_DATA__ returns slots outside the 5:00 PM - 9:30 PM window
+        page.evaluate = AsyncMock(return_value={
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T11:00"},
+                        {"dateTime": "2026-03-15T14:00"},
+                    ]
+                }
+            }
+        })
+        page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+
+        worker = _make_worker(page=page)
+        worker._try_day = AsyncMock(return_value=False)
+
+        result = await worker._poll()
+
+        assert result is False
+        worker._try_day.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_poll_proceeds_to_dom_when_next_data_has_matching_slot(self):
+        """__NEXT_DATA__ finds a slot in window -> _try_day IS called."""
+        page = AsyncMock()
+        page.goto = AsyncMock()
+        # __NEXT_DATA__ returns a slot inside the 5:00 PM - 9:30 PM window
+        page.evaluate = AsyncMock(return_value={
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T18:00"},  # 6:00 PM — in window
+                    ]
+                }
+            }
+        })
+        page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+
+        worker = _make_worker(page=page)
+        worker._try_day = AsyncMock(return_value=True)
+
+        result = await worker._poll()
+
+        assert result is True
+        worker._try_day.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_falls_back_to_dom_when_next_data_unavailable(self):
+        """__NEXT_DATA__ returns None -> falls through to DOM path, _try_day IS called."""
+        page = AsyncMock()
+        page.goto = AsyncMock()
+        # __NEXT_DATA__ element not found
+        page.evaluate = AsyncMock(return_value=None)
+        page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+
+        worker = _make_worker(page=page)
+        worker._try_day = AsyncMock(return_value=True)
+
+        result = await worker._poll()
+
+        assert result is True
+        worker._try_day.assert_awaited_once()
