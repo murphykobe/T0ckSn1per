@@ -133,3 +133,33 @@ class TestBuildTasks:
         }
         tasks = _build_tasks("alinea", "2", avail)
         assert tasks[0].targets[0].date == "2026-05-20"
+
+
+# ── _parse_next_data_json tests ──────────────────────────────────────────────
+
+from sniper import _parse_next_data_json
+
+
+class TestReconNextData:
+    def test_extracts_slots_from_availabilities(self):
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T17:00"},
+                        {"dateTime": "2026-03-15T19:30"},
+                    ]
+                }
+            }
+        }
+        result = _parse_next_data_json(next_data)
+        assert result is not None
+        assert "5:00 PM" in result
+        assert "7:30 PM" in result
+
+    def test_returns_none_when_no_data(self):
+        assert _parse_next_data_json(None) is None
+
+    def test_returns_none_when_no_slots(self):
+        next_data = {"props": {"pageProps": {"businessName": "Canlis"}}}
+        assert _parse_next_data_json(next_data) is None

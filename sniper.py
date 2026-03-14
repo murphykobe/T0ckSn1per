@@ -60,6 +60,129 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# ── __NEXT_DATA__ shared helpers ─────────────────────────────────────────────
+
+# Keys in __NEXT_DATA__.props.pageProps to search for availability data
+_AVAILABILITY_KEYS = (
+    "availabilities", "availability", "searchResults",
+    "experiences", "timeslots", "slots",
+)
+
+# Fields whose values are treated as time strings
+_TIME_FIELDS = {"time", "dateTime", "startTime", "start_time", "startDate"}
+
+
+def _collect_times_from_tree(obj, out: list) -> None:
+    """Recursively collect formatted time values from *obj*."""
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in _TIME_FIELDS and isinstance(value, str):
+                fmt = _format_time_str(value)
+                if fmt:
+                    out.append(fmt)
+            else:
+                _collect_times_from_tree(value, out)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_times_from_tree(item, out)
+
+
+def _format_time_str(raw: str) -> Optional[str]:
+    """Convert a raw time string to 'H:MM AM/PM' format.
+
+    Handles:
+      - ISO datetime: '2026-03-15T17:00' or '2026-03-15T17:00:00'
+      - 24-hour: '17:00'
+      - 12-hour passthrough: '5:00 PM'
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+
+    # 12-hour passthrough (already in target format)
+    if re.search(r'[AaPp][Mm]', raw):
+        try:
+            dt = datetime.strptime(raw, "%I:%M %p")
+            return dt.strftime("%-I:%M %p")
+        except ValueError:
+            return None
+
+    # ISO datetime (contains 'T')
+    if 'T' in raw:
+        time_part = raw.split('T', 1)[1]
+        # Strip seconds and timezone if present
+        time_part = time_part[:5]
+    else:
+        time_part = raw[:5]
+
+    # Parse as 24-hour
+    try:
+        dt = datetime.strptime(time_part, "%H:%M")
+        return dt.strftime("%-I:%M %p")
+    except ValueError:
+        return None
+
+
+def _parse_next_data_json(next_data: dict) -> Optional[list]:
+    """Parse a __NEXT_DATA__ JSON dict and return deduplicated time strings.
+
+    Returns a list of "H:MM AM/PM" time strings, or None if no availability
+    data could be extracted.
+    """
+    if not next_data:
+        return None
+
+    try:
+        page_props = next_data.get("props", {}).get("pageProps", {})
+    except (AttributeError, TypeError):
+        return None
+
+    # Collect candidates from all known paths (scan all, not first-match)
+    candidates: list = []
+
+    # Direct keys under pageProps
+    for key in _AVAILABILITY_KEYS:
+        val = page_props.get(key)
+        if val is not None:
+            candidates.append(val)
+
+    # initialData.availability / initialData.searchResults
+    initial = page_props.get("initialData")
+    if isinstance(initial, dict):
+        for key in ("availability", "searchResults"):
+            val = initial.get(key)
+            if val is not None:
+                candidates.append(val)
+
+    # dehydratedState.queries[0].state.data (React Query hydration)
+    dehydrated = page_props.get("dehydratedState")
+    if isinstance(dehydrated, dict):
+        queries = dehydrated.get("queries")
+        if isinstance(queries, list) and queries:
+            state = queries[0].get("state", {}) if isinstance(queries[0], dict) else {}
+            if "data" in state:
+                candidates.append(state["data"])
+
+    if not candidates:
+        return None
+
+    times: list = []
+    for candidate in candidates:
+        _collect_times_from_tree(candidate, times)
+
+    if not times:
+        return None
+
+    # Deduplicate while preserving order
+    seen: set = set()
+    result: list = []
+    for t in times:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
+    return result
+
 
 # ── Stealth helper ────────────────────────────────────────────────────────────
 
@@ -280,15 +403,6 @@ class DayWorker:
 
     # ── __NEXT_DATA__ extraction ─────────────────────────────────────────────
 
-    # Keys in __NEXT_DATA__.props.pageProps to search for availability data
-    _AVAILABILITY_KEYS = (
-        "availabilities", "availability", "searchResults",
-        "experiences", "timeslots", "slots",
-    )
-
-    # Fields whose values are treated as time strings
-    _TIME_FIELDS = {"time", "dateTime", "startTime", "start_time", "startDate"}
-
     async def _extract_next_data(self) -> Optional[List[str]]:
         """Extract availability times from __NEXT_DATA__ JSON embedded in the page.
 
@@ -306,110 +420,7 @@ class DayWorker:
             )
         except Exception:
             return None
-
-        if not raw:
-            return None
-
-        try:
-            page_props = raw.get("props", {}).get("pageProps", {})
-        except (AttributeError, TypeError):
-            return None
-
-        # Collect candidates from all known paths (scan all, not first-match)
-        candidates: list = []
-
-        # Direct keys under pageProps
-        for key in self._AVAILABILITY_KEYS:
-            val = page_props.get(key)
-            if val is not None:
-                candidates.append(val)
-
-        # initialData.availability / initialData.searchResults
-        initial = page_props.get("initialData")
-        if isinstance(initial, dict):
-            for key in ("availability", "searchResults"):
-                val = initial.get(key)
-                if val is not None:
-                    candidates.append(val)
-
-        # dehydratedState.queries[0].state.data (React Query hydration)
-        dehydrated = page_props.get("dehydratedState")
-        if isinstance(dehydrated, dict):
-            queries = dehydrated.get("queries")
-            if isinstance(queries, list) and queries:
-                state = queries[0].get("state", {}) if isinstance(queries[0], dict) else {}
-                if "data" in state:
-                    candidates.append(state["data"])
-
-        if not candidates:
-            return None
-
-        times: list = []
-        for candidate in candidates:
-            self._collect_times(candidate, times)
-
-        if not times:
-            return None
-
-        # Deduplicate while preserving order
-        seen: set = set()
-        result: list = []
-        for t in times:
-            if t not in seen:
-                seen.add(t)
-                result.append(t)
-        return result
-
-    def _collect_times(self, obj, out: list) -> None:
-        """Recursively collect formatted time values from *obj*."""
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                if key in self._TIME_FIELDS and isinstance(value, str):
-                    fmt = self._format_time(value)
-                    if fmt:
-                        out.append(fmt)
-                else:
-                    self._collect_times(value, out)
-        elif isinstance(obj, list):
-            for item in obj:
-                self._collect_times(item, out)
-
-    @staticmethod
-    def _format_time(raw: str) -> Optional[str]:
-        """Convert a raw time string to 'H:MM AM/PM' format.
-
-        Handles:
-          - ISO datetime: '2026-03-15T17:00' or '2026-03-15T17:00:00'
-          - 24-hour: '17:00'
-          - 12-hour passthrough: '5:00 PM'
-        """
-        if not raw:
-            return None
-
-        raw = raw.strip()
-
-        # 12-hour passthrough (already in target format)
-        if re.search(r'[AaPp][Mm]', raw):
-            try:
-                dt = datetime.strptime(raw, "%I:%M %p")
-                return dt.strftime("%-I:%M %p")
-            except ValueError:
-                return None
-
-        # ISO datetime (contains 'T')
-        if 'T' in raw:
-            time_part = raw.split('T', 1)[1]
-            # Strip seconds and timezone if present
-            time_part = time_part[:5]
-        else:
-            time_part = raw[:5]
-
-        # Parse as 24-hour
-        try:
-            dt = datetime.strptime(time_part, "%H:%M")
-            return dt.strftime("%-I:%M %p")
-        except ValueError:
-            return None
+        return _parse_next_data_json(raw)
 
 
 # ── Cookie helpers ────────────────────────────────────────────────────────────
