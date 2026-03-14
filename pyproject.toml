@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "t0cksn1per"
+version = "0.2.0"
+description = "Concurrent Tock reservation sniper built on Playwright + asyncio"
+requires-python = ">=3.9"
+dependencies = [
+    "playwright>=1.44.0",
+    "playwright-stealth>=1.0.6",
+]
+
+[project.optional-dependencies]
+ai = ["anthropic>=0.28.0"]
+notify = ["plyer>=2.1.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+t0cksn1per = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "sniper", "recon", "models", "notifier"]
