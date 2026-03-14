@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
 
 from models import Task, Target, RESERVATION_TIME_FORMAT
-from sniper import _parse_next_data_json
+from sniper import _parse_next_data_json, NEXT_DATA_JS
 
 log = logging.getLogger(__name__)
 
@@ -88,14 +88,7 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
             # Try __NEXT_DATA__ extraction as supplementary data source
             nd_slots = None
             try:
-                next_data = await page.evaluate(
-                    """() => {
-                        const el = document.querySelector('#__NEXT_DATA__');
-                        if (!el) return null;
-                        try { return JSON.parse(el.textContent); }
-                        catch { return null; }
-                    }"""
-                )
+                next_data = await page.evaluate(NEXT_DATA_JS)
                 nd_slots = _parse_next_data_json(next_data)
                 if nd_slots:
                     log.info("[recon] __NEXT_DATA__ found %d slot(s)", len(nd_slots))
