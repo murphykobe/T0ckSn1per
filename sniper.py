@@ -139,6 +139,17 @@ class DayWorker:
 
     # ── Poll cycle ────────────────────────────────────────────────────────────
 
+    def _any_slot_in_window(self, time_strings: list) -> bool:
+        """Check if any time string falls within the target's earliest/latest window."""
+        for t_str in time_strings:
+            try:
+                t = datetime.strptime(t_str, RESERVATION_TIME_FORMAT)
+                if self.target.earliest_dt() <= t <= self.target.latest_dt():
+                    return True
+            except ValueError:
+                continue
+        return False
+
     async def _poll(self) -> bool:
         """Load search page and look for an available slot on self.target.date."""
         try:
@@ -147,15 +158,37 @@ class DayWorker:
                 wait_until="domcontentloaded",
                 timeout=PAGE_LOAD_TIMEOUT,
             )
-            await self.page.wait_for_selector(
-                "div.ConsumerCalendar-month",
-                timeout=PAGE_LOAD_TIMEOUT,
-            )
         except PWTimeout:
             log.debug("[%s/%s] Page timeout, retrying", self.task.url, self.target.date)
             return False
         except Exception as e:
             log.warning("[%s/%s] Page load error: %s", self.task.url, self.target.date, e)
+            return False
+
+        # Fast pre-filter: check __NEXT_DATA__ before waiting for full DOM
+        next_data_slots = await self._extract_next_data()
+        if next_data_slots is not None:
+            if not self._any_slot_in_window(next_data_slots):
+                log.debug(
+                    "[%s/%s] __NEXT_DATA__ shows %d slot(s) but none in window — skipping DOM",
+                    self.task.url, self.target.date, len(next_data_slots),
+                )
+                return False
+            log.info(
+                "[%s/%s] __NEXT_DATA__ has matching slot(s) — proceeding to DOM path",
+                self.task.url, self.target.date,
+            )
+
+        try:
+            await self.page.wait_for_selector(
+                "div.ConsumerCalendar-month",
+                timeout=PAGE_LOAD_TIMEOUT,
+            )
+        except PWTimeout:
+            log.debug("[%s/%s] Calendar selector timeout, retrying", self.task.url, self.target.date)
+            return False
+        except Exception as e:
+            log.warning("[%s/%s] Calendar load error: %s", self.task.url, self.target.date, e)
             return False
 
         # Extra settle time for React to render day buttons after calendar container appears
