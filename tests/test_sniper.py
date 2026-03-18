@@ -6,6 +6,7 @@ these tests run instantly without launching Chrome.
 """
 
 import asyncio
+import time
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -203,6 +204,23 @@ class TestTryTime:
         worker = _make_worker(page=page)
         assert await worker._try_time() is False
 
+    @pytest.mark.asyncio
+    async def test_rejects_failed_cart_add(self):
+        """_try_time returns False when checkout URL doesn't confirm cart."""
+        from playwright.async_api import TimeoutError as PWTimeout
+        slot = _make_slot_element("6:00 PM")
+        page = _make_page([slot])
+        # After clicking, URL stays on search page (cart add failed)
+        page.url = "https://www.exploretock.com/alinea/search?date=2026-03-15"
+        page.wait_for_url = AsyncMock(side_effect=PWTimeout("timeout"))
+        # No holding-time element, no "Complete your reservation" text
+        page.query_selector = AsyncMock(return_value=None)
+
+        worker = _make_worker(page=page)
+        result = await worker._try_time()
+        assert result is False, "Should reject when cart add is not confirmed"
+        assert worker.checkout_url is None
+
 
 # ── found_event propagation ───────────────────────────────────────────────────
 
@@ -285,3 +303,277 @@ async def test_day_worker_prompt_login_default_false(task, target):
     event = asyncio.Event()
     worker = DayWorker(task=task, target=target, page=page, found_event=event)
     assert worker.prompt_login is False
+
+
+@pytest.mark.asyncio
+async def test_day_worker_polls_immediately_first_iteration(task, target):
+    """DayWorker should not sleep before its first poll attempt."""
+    page = AsyncMock()
+    page.goto = AsyncMock()
+    page.wait_for_selector = AsyncMock(side_effect=Exception("stop"))
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event, interval=30.0)
+
+    start = time.monotonic()
+    # Run worker briefly — it should attempt _poll almost immediately, not after 30s
+    try:
+        await asyncio.wait_for(worker.run(), timeout=2.0)
+    except asyncio.TimeoutError:
+        pass
+    elapsed = time.monotonic() - start
+
+    # Worker should have called page.goto (attempted a poll) within 2 seconds
+    assert page.goto.called, "Worker never attempted to poll"
+    assert elapsed < 3.0, f"Worker took {elapsed:.1f}s — should poll immediately, not sleep first"
+
+
+# ── _extract_next_data tests ─────────────────────────────────────────────────
+
+import json
+
+class TestExtractNextData:
+    @pytest.mark.asyncio
+    async def test_returns_slots_from_pageprops(self):
+        """Extracts times from pageProps.availabilities path; ISO datetimes convert correctly."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T17:00"},
+                        {"dateTime": "2026-03-15T19:30"},
+                        {"dateTime": "2026-03-15T21:00"},
+                    ]
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "5:00 PM" in result
+        assert "7:30 PM" in result
+        assert "9:00 PM" in result
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_next_data_element(self):
+        """page.evaluate returns None → returns None."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=None)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_slots_found(self):
+        """__NEXT_DATA__ exists but no availability keys → returns None."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "restaurantName": "Alinea",
+                    "someOtherKey": 123,
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_handles_iso_datetime_format(self):
+        """ISO datetime 2026-03-15T14:00 → 2:00 PM."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "availability": [
+                        {"startTime": "2026-03-15T14:00"},
+                    ]
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "2:00 PM" in result
+
+    @pytest.mark.asyncio
+    async def test_handles_nested_arrays(self):
+        """Finds slots inside nested dict values that are arrays."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "searchResults": {
+                        "results": [
+                            {"time": "17:00"},
+                            {"nested": {"time": "19:00"}},
+                        ]
+                    }
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "5:00 PM" in result
+        assert "7:00 PM" in result
+
+    @pytest.mark.asyncio
+    async def test_handles_evaluate_exception(self):
+        """page.evaluate throws → returns None gracefully."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(side_effect=Exception("browser crashed"))
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_dehydrated_state_path(self):
+        """Extracts from dehydratedState.queries[0].state.data."""
+        next_data = {
+            "props": {
+                "pageProps": {
+                    "dehydratedState": {
+                        "queries": [
+                            {
+                                "state": {
+                                    "data": [
+                                        {"startTime": "2026-03-15T18:00"},
+                                        {"startTime": "2026-03-15T20:30"},
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        page = AsyncMock()
+        page.evaluate = AsyncMock(return_value=next_data)
+        worker = _make_worker(page=page)
+        result = await worker._extract_next_data()
+        assert result is not None
+        assert "6:00 PM" in result
+        assert "8:30 PM" in result
+
+
+# ── _poll() with __NEXT_DATA__ pre-filter tests ─────────────────────────────
+
+class TestPollWithNextData:
+    @pytest.mark.asyncio
+    async def test_poll_skips_dom_when_next_data_has_no_matching_slots(self):
+        """__NEXT_DATA__ returns slots but none in window -> _try_day NOT called, returns False."""
+        page = AsyncMock()
+        page.goto = AsyncMock()
+        # __NEXT_DATA__ returns slots outside the 5:00 PM - 9:30 PM window
+        page.evaluate = AsyncMock(return_value={
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T11:00"},
+                        {"dateTime": "2026-03-15T14:00"},
+                    ]
+                }
+            }
+        })
+        page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+
+        worker = _make_worker(page=page)
+        worker._try_day = AsyncMock(return_value=False)
+
+        result = await worker._poll()
+
+        assert result is False
+        worker._try_day.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_poll_proceeds_to_dom_when_next_data_has_matching_slot(self):
+        """__NEXT_DATA__ finds a slot in window -> _try_day IS called."""
+        page = AsyncMock()
+        page.goto = AsyncMock()
+        # __NEXT_DATA__ returns a slot inside the 5:00 PM - 9:30 PM window
+        page.evaluate = AsyncMock(return_value={
+            "props": {
+                "pageProps": {
+                    "availabilities": [
+                        {"dateTime": "2026-03-15T18:00"},  # 6:00 PM — in window
+                    ]
+                }
+            }
+        })
+        page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+
+        worker = _make_worker(page=page)
+        worker._try_day = AsyncMock(return_value=True)
+
+        result = await worker._poll()
+
+        assert result is True
+        worker._try_day.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_falls_back_to_dom_when_next_data_unavailable(self):
+        """__NEXT_DATA__ returns None -> falls through to DOM path, _try_day IS called."""
+        page = AsyncMock()
+        page.goto = AsyncMock()
+        # __NEXT_DATA__ element not found
+        page.evaluate = AsyncMock(return_value=None)
+        page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+
+        worker = _make_worker(page=page)
+        worker._try_day = AsyncMock(return_value=True)
+
+        result = await worker._poll()
+
+        assert result is True
+        worker._try_day.assert_awaited_once()
+
+
+# ── _any_slot_in_window tests ────────────────────────────────────────────────
+
+class TestAnySlotInWindow:
+    """Test _any_slot_in_window() boundary logic."""
+
+    def test_slot_in_window(self):
+        worker = _make_worker()  # window 5:00 PM - 9:30 PM
+        assert worker._any_slot_in_window(["7:00 PM"]) is True
+
+    def test_slot_at_earliest_boundary(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["5:00 PM"]) is True
+
+    def test_slot_at_latest_boundary(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["9:30 PM"]) is True
+
+    def test_slot_before_window(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["4:59 PM"]) is False
+
+    def test_slot_after_window(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["9:31 PM"]) is False
+
+    def test_mixed_slots_one_match(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["3:00 PM", "10:00 PM", "6:00 PM"]) is True
+
+    def test_empty_list(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window([]) is False
+
+    def test_unparseable_times_skipped(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["garbage", "not-a-time"]) is False
+
+    def test_unparseable_mixed_with_valid(self):
+        worker = _make_worker()
+        assert worker._any_slot_in_window(["garbage", "7:00 PM"]) is True

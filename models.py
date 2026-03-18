@@ -30,11 +30,19 @@ class Target:
         return datetime.strptime(self.latest_time, RESERVATION_TIME_FORMAT)
 
     def search_url(self, restaurant_slug: str, party_size: str) -> str:
+        # Derive time param from midpoint of the target window so Tock's
+        # UI scrolls to roughly the right area of the day.
+        try:
+            e = self.earliest_dt()
+            l = self.latest_dt()
+            mid_minutes = (e.hour * 60 + e.minute + l.hour * 60 + l.minute) // 2
+            mid_h, mid_m = divmod(mid_minutes, 60)
+            time_param = f"{mid_h}%3A{mid_m:02d}"
+        except (ValueError, TypeError):
+            time_param = "19%3A00"
         return (
             f"https://www.exploretock.com/{restaurant_slug}/search"
-            # Tock's search URL requires a time param; 19:00 is a safe default — actual
-            # time filtering is done by comparing slot times against earliest_time/latest_time.
-            f"?date={self.date}&size={party_size}&time=19%3A00"
+            f"?date={self.date}&size={party_size}&time={time_param}"
         )
 
     def to_dict(self) -> dict:
