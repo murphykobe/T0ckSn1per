@@ -19,12 +19,14 @@ Concurrent Tock reservation sniper built on Playwright + asyncio. Opens one brow
 python3 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 
-# 2. Install Python dependencies
-pip install -r requirements.txt
+# 2. Install as a package (editable mode for development)
+pip install -e ".[dev,ai,notify]"
 
 # 3. Install Playwright's Chromium browser
 playwright install chromium
 ```
+
+This installs a `t0cksn1per` CLI command. You can also run directly with `python main.py`.
 
 All subsequent commands assume the venv is active (or use `venv/bin/python3` / `venv/bin/pytest` directly).
 
@@ -39,7 +41,8 @@ There are three subcommands. The Tock restaurant **slug** is the path segment fr
 Scrapes the restaurant's Tock calendar and prints (or saves) a JSON task config.
 
 ```bash
-# Print discovered availability
+# Print discovered availability (either form works)
+t0cksn1per recon canlis --size 2
 python main.py recon canlis --size 2
 
 # Save to a file for later use with `snipe`
@@ -53,11 +56,10 @@ Sample output:
   {
     "url": "canlis",
     "size": "2",
-    "year": "2026",
-    "month": "March",
-    "days": ["14", "21", "28"],
-    "earliest_time": "5:30 PM",
-    "latest_time": "9:00 PM"
+    "targets": [
+      {"date": "2026-03-14", "earliest_time": "5:00 PM", "latest_time": "9:30 PM"},
+      {"date": "2026-03-21", "earliest_time": "5:00 PM", "latest_time": "9:30 PM"}
+    ]
   }
 ]
 ```
@@ -66,16 +68,24 @@ If `ANTHROPIC_API_KEY` is set, Claude will refine the time window. Otherwise a b
 
 ---
 
-### `snipe` — snipe from a saved config
+### `snipe` — snipe from a saved config or inline targets
 
-Loads a JSON config from `recon` and starts polling immediately.
+Loads a JSON config from `recon`, or accepts inline `--target` flags, and starts polling immediately.
 
 ```bash
-# Live snipe (clicks real slots)
+# Live snipe from a config file
 python main.py snipe --config canlis.json
+
+# Inline targets (no config file needed)
+python main.py snipe canlis \
+  --target 2026-03-14 "5:00 PM" "9:30 PM" 2 \
+  --target 2026-03-21 "5:00 PM" "9:30 PM" 2
 
 # Dry-run: finds slots but does not click them
 python main.py snipe --config canlis.json --dry-run
+
+# Output structured JSON on stdout
+python main.py snipe --config canlis.json --json
 ```
 
 When a slot is secured the browser stays open for **10 minutes** — complete checkout manually before Tock releases the hold.
@@ -90,9 +100,14 @@ python main.py run canlis --size 2
 # Also save the discovered config
 python main.py run canlis --size 2 --save canlis.json
 
-# Dry-run
-python main.py run canlis --size 2 --dry-run
+# Release mode: wait until 10:00 AM Chicago time, then fire
+python main.py run canlis --size 2 --release-at 10:00 --timezone America/Chicago
+
+# Dry-run with custom interval
+python main.py run canlis --size 2 --dry-run --interval 15
 ```
+
+The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
 
 ---
 
@@ -109,11 +124,18 @@ main.py  (CLI)
    │
    └─ sniper.py  ── opens one browser per Task
                     opens one tab per target day, all polling concurrently
-                    each tab polls on a randomised interval (default 1 s ± 300 ms)
+                    each tab polls on a randomised interval (default 30 s ± 10% jitter)
+                    each poll cycle:
+                      1. loads the search page (domcontentloaded)
+                      2. extracts __NEXT_DATA__ JSON (Next.js SSR data) for fast slot detection
+                      3. if no matching slots in window → return immediately (skips DOM wait)
+                      4. if matching slots found → fall through to DOM click flow
+                      5. if __NEXT_DATA__ unavailable → fall back to DOM scraping
                     first tab to find + click a slot:
                       1. sets a shared asyncio.Event → all other tabs stop
-                      2. fires notifications (console banner + desktop popup + bell)
-                      3. keeps the browser open for 10 min so you can finish checkout
+                      2. verifies cart add succeeded (checkout URL / holding-time / confirmation text)
+                      3. fires notifications (console banner + desktop popup + bell)
+                      4. keeps the browser open for 10 min so you can finish checkout
 ```
 
 **Anti-detection measures:**
@@ -134,12 +156,27 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 |-----------------------|--------------------------------|--------------------------------------------------------|
 | `PLAYWRIGHT_HEADLESS` | `0`                            | Set to `1` for headless mode (CI / no display)         |
 | `CHROME_EXECUTABLE`   | Playwright's bundled Chromium  | Path to a custom Chrome binary                         |
-| `REFRESH_DELAY_SEC`   | `1.0`                          | Base seconds between poll cycles per tab               |
 | `ANTHROPIC_API_KEY`   | —                              | Enables Claude-assisted time-window refinement in recon|
-| `TOCK_USERNAME`       | —                              | Tock account email (only needed if `ENABLE_LOGIN=True`)|
-| `TOCK_PASSWORD`       | —                              | Tock account password                                  |
 
-> **Login:** set `ENABLE_LOGIN = True` in `sniper.py` and export `TOCK_USERNAME` / `TOCK_PASSWORD`. The login is shared across all tabs in the same browser context.
+---
+
+## CLI Flags
+
+### `snipe` subcommand
+
+| Flag              | Description                                                        |
+|-------------------|--------------------------------------------------------------------|
+| `--target DATE EARLIEST LATEST SIZE` | Inline target (repeatable). Example: `--target 2026-03-14 "5:00 PM" "9:30 PM" 2` |
+| `--config FILE`   | JSON config file from `recon`                                      |
+| `--interval SECONDS` | Poll interval in seconds (default: 30)                          |
+| `--max-duration MINUTES` | Stop after this many minutes (0 = unlimited)                |
+| `--release-at HH:MM` | Start sniping at this time of day                               |
+| `--timezone TZ`   | Timezone for `--release-at` (e.g. `America/Chicago`)               |
+| `--cookies-file FILE` | Path to Netscape cookies file for authentication               |
+| `--login`         | Perform interactive browser login before sniping                   |
+| `--prompt-login`  | After cart add, prompt for Tock credentials to tie cart to your account |
+| `--json`          | Output result as JSON on stdout                                    |
+| `--dry-run`       | Find slots but do not click them                                   |
 
 ---
 
@@ -155,11 +192,11 @@ venv/bin/pytest tests/ --ignore=tests/integration -v
 
 | File | What it covers |
 |---|---|
-| `tests/test_models.py` | URL building, time-window parsing, JSON round-trip |
-| `tests/test_recon.py` | `_parse_time`, `_time_str`, `_build_tasks`, fallback window |
-| `tests/test_sniper.py` | `DayWorker._try_time`: window logic, dry-run, found-event |
+| `tests/test_models.py` | URL building, time-window parsing, JSON round-trip (5 tests) |
+| `tests/test_recon.py` | `_parse_time`, `_time_str`, `_build_tasks`, `__NEXT_DATA__` parser (19 tests) |
+| `tests/test_sniper.py` | `DayWorker._try_time`, `_extract_next_data`, `_poll` pre-filter, `_any_slot_in_window`, cart verification, cookies (41 tests) |
 
-All Playwright interactions are replaced with `AsyncMock` — the suite runs in ~0.4 s.
+All Playwright interactions are replaced with `AsyncMock` — the suite runs in ~2 s.
 
 ---
 

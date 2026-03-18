@@ -41,8 +41,8 @@ def notify_user(message: str, hold_minutes: int = 10) -> None:
     except Exception:
         try:
             for _ in range(5):
-                sys.stdout.write("\a")
-                sys.stdout.flush()
+                sys.stderr.write("\a")
+                sys.stderr.flush()
                 time.sleep(0.3)
         except Exception:
             pass

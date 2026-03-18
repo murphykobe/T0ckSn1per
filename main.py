@@ -57,6 +57,7 @@ def _print_results(results: list, json_mode: bool) -> None:
                     f"  SLOT SECURED — complete checkout in your browser!\n"
                     f"  Restaurant : {r['restaurant']}\n"
                     f"  Date       : {r['date']}\n"
+                    f"  Time       : {r.get('time', 'N/A')}\n"
                     f"  Checkout   : {r.get('checkout_url', 'N/A')}\n"
                     f"{'='*60}\n"
                 )
@@ -112,6 +113,7 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
         interval=args.interval,
         max_duration=args.max_duration,
         release_at=getattr(args, "release_at", None),
+        timezone=getattr(args, "timezone", None),
         cookies_file=getattr(args, "cookies_file", None),
         interactive_login=getattr(args, "login", False),
         prompt_login=getattr(args, "prompt_login", False),
@@ -127,7 +129,17 @@ async def _cmd_run(args: argparse.Namespace) -> None:
         sys.exit(1)
     if args.save:
         save_config(tasks, args.save)
-    results = await snipe_all(tasks, dry_run=args.dry_run, interval=args.interval)
+    snipe_kwargs = dict(
+        dry_run=args.dry_run,
+        interval=args.interval,
+        max_duration=args.max_duration,
+        release_at=getattr(args, "release_at", None),
+        timezone=getattr(args, "timezone", None),
+        cookies_file=getattr(args, "cookies_file", None),
+        interactive_login=getattr(args, "login", False),
+        prompt_login=getattr(args, "prompt_login", False),
+    )
+    results = await snipe_all(tasks, **snipe_kwargs)
     _print_results(results, json_mode=args.json)
 
 
@@ -172,7 +184,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_snipe.add_argument("--login", action="store_true",
                          help="Perform interactive browser login before sniping")
     p_snipe.add_argument("--prompt-login", action="store_true",
-                         help="Prompt for credentials at startup")
+                         help="After cart add, prompt for Tock credentials to tie cart to your account")
     p_snipe.add_argument("--json", action="store_true",
                          help="Output result as JSON on stdout")
 
@@ -184,6 +196,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--save", metavar="FILE", help="Also save recon config to JSON")
     p_run.add_argument("--interval", type=float, default=30.0, metavar="SECONDS",
                        help="Poll interval in seconds (default: 30)")
+    p_run.add_argument("--max-duration", type=float, default=0, metavar="MINUTES",
+                       help="Stop after this many minutes (0 = unlimited)")
+    p_run.add_argument("--release-at", metavar="HH:MM",
+                       help="Start sniping at this time of day")
+    p_run.add_argument("--timezone", metavar="TZ",
+                       help="Timezone for --release-at (e.g. America/Chicago)")
+    p_run.add_argument("--cookies-file", metavar="FILE",
+                       help="Path to Netscape cookies file for authentication")
+    p_run.add_argument("--login", action="store_true",
+                       help="Perform interactive browser login before sniping")
+    p_run.add_argument("--prompt-login", action="store_true",
+                       help="After cart add, prompt for Tock credentials to tie cart to your account")
     p_run.add_argument("--json", action="store_true",
                        help="Output result as JSON on stdout")
 
@@ -201,7 +225,11 @@ def main() -> None:
         "snipe": _cmd_snipe,
         "run":   _cmd_run,
     }
-    asyncio.run(dispatch[args.command](args))
+    try:
+        asyncio.run(dispatch[args.command](args))
+    except KeyboardInterrupt:
+        print("\n[t0cksn1per] Interrupted — shutting down.", file=sys.stderr)
+        sys.exit(130)  # 128 + SIGINT(2)
 
 
 if __name__ == "__main__":
