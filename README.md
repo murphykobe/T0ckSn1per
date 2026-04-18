@@ -122,6 +122,12 @@ python main.py run taneda \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM"
 
+# No date preference: target any newly released date for this party size
+python main.py run taneda \
+  --size 1 \
+  --release-at 11:00 \
+  --newly-released-only
+
 # Attach to an existing local Chrome via CDP instead of launching a managed browser
 python main.py run taneda \
   --size 2 \

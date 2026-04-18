@@ -150,3 +150,18 @@ def test_task_filter_dates_preserves_exact_times():
 
     assert [t.date for t in filtered.expand_targets()] == ["2026-06-18", "2026-06-18"]
     assert [t.exact_time for t in filtered.expand_targets()] == ["5:15 PM", "7:45 PM"]
+
+
+def test_task_filter_dates_expands_empty_date_preferences_to_eligible_dates():
+    from models import Selector
+
+    task = Task(
+        url="taneda",
+        size="1",
+        selectors=[Selector(dates=[])],
+    )
+
+    filtered = task.filter_dates(["2026-05-27", "2026-05-28"])
+
+    assert [t.date for t in filtered.expand_targets()] == ["2026-05-27", "2026-05-28"]
+    assert all(t.earliest_time == "12:00 PM" for t in filtered.expand_targets())

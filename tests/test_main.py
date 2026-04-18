@@ -4,7 +4,7 @@ import argparse
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from main import _build_inline_task, _build_parser
+from main import _build_inline_task, _build_parser, _should_use_inline_task
 
 
 def test_build_inline_task_uses_date_and_exact_time_flags():
@@ -112,3 +112,53 @@ def test_parser_accepts_cdp_url_for_run():
     ])
 
     assert args.cdp_url == "http://127.0.0.1:9222"
+
+
+def test_build_inline_task_supports_launch_mode_without_date_preferences():
+    args = argparse.Namespace(
+        slug="taneda",
+        size="1",
+        target=None,
+        date=[],
+        exact_time=[],
+        dates=None,
+        exact_times=None,
+        release_at="11:00",
+        newly_released_only=True,
+    )
+
+    task = _build_inline_task(args)
+
+    assert task.size == "1"
+    assert task.launch is not None
+    assert task.launch.newly_released_only is True
+    assert [selector.to_dict() for selector in task.selectors] == [
+        {"dates": []}
+    ]
+
+
+def test_run_uses_inline_launch_task_when_no_dates_are_provided():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--size", "1",
+        "--release-at", "11:00",
+        "--newly-released-only",
+    ])
+
+    assert _should_use_inline_task(args) is True
+
+
+def test_snipe_uses_inline_launch_task_when_no_dates_are_provided():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "snipe",
+        "taneda",
+        "--release-at", "11:00",
+        "--newly-released-only",
+    ])
+
+    assert _should_use_inline_task(args) is True
