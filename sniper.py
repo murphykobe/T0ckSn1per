@@ -215,6 +215,117 @@ def _newly_released_dates(
     return eligible
 
 
+def _remaining_deadline_seconds(deadline: Optional[float]) -> Optional[float]:
+    if deadline is None:
+        return None
+    return max(0.0, deadline - asyncio.get_running_loop().time())
+
+
+def _monitor_timeout_message(
+    max_duration: float,
+    deadline: Optional[float],
+) -> tuple[Optional[float], Optional[str]]:
+    deadline_timeout = _remaining_deadline_seconds(deadline)
+    max_timeout = max_duration * 60 if max_duration > 0 else None
+
+    timeout_options = [timeout for timeout in (deadline_timeout, max_timeout) if timeout is not None]
+    if not timeout_options:
+        return None, None
+
+    timeout_seconds = min(timeout_options)
+    if max_timeout is not None and timeout_seconds == max_timeout:
+        return timeout_seconds, f"max-duration {max_duration:.0f}min reached"
+    if deadline is not None:
+        return timeout_seconds, "monitoring window reached"
+    return timeout_seconds, None
+
+
+async def _wait_for_worker_outcome(
+    task_url: str,
+    found_event: asyncio.Event,
+    worker_tasks: list,
+    timeout_seconds: Optional[float],
+    timeout_message: Optional[str],
+) -> None:
+    if not worker_tasks:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout_seconds is None else (loop.time() + timeout_seconds)
+    event_task = asyncio.create_task(found_event.wait())
+
+    try:
+        while True:
+            if all(worker_task.done() for worker_task in worker_tasks):
+                await asyncio.gather(*worker_tasks, return_exceptions=True)
+                return
+
+            pending = {worker_task for worker_task in worker_tasks if not worker_task.done()}
+            if not event_task.done():
+                pending.add(event_task)
+
+            wait_timeout = None
+            if deadline is not None:
+                wait_timeout = max(0.0, deadline - loop.time())
+                if wait_timeout <= 0:
+                    if timeout_message:
+                        log.info("[%s] %s — stopping.", task_url, timeout_message)
+                    await _stop_worker_tasks(task_url, found_event, worker_tasks)
+                    return
+
+            done, _ = await asyncio.wait(
+                pending,
+                timeout=wait_timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                if timeout_message:
+                    log.info("[%s] %s — stopping.", task_url, timeout_message)
+                await _stop_worker_tasks(task_url, found_event, worker_tasks)
+                return
+
+            if event_task in done:
+                await _stop_worker_tasks(task_url, found_event, worker_tasks)
+                return
+    finally:
+        if not event_task.done():
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
+
+
+async def _monitor_newly_released_dates(
+    page: Page,
+    task: Task,
+    requested_dates: Optional[list],
+    interval: float,
+    deadline: Optional[float],
+    baseline_dates: Optional[set] = None,
+) -> list:
+    if baseline_dates is None:
+        baseline = set(await _capture_available_dates(page, task.url, task.size))
+    else:
+        baseline = set(baseline_dates)
+
+    while True:
+        current = await _capture_available_dates(page, task.url, task.size)
+        eligible = _newly_released_dates(
+            before=baseline,
+            after=current,
+            requested_dates=requested_dates,
+        )
+        if eligible:
+            return eligible
+
+        remaining = _remaining_deadline_seconds(deadline)
+        if remaining is not None and remaining <= 0:
+            return []
+
+        sleep_for = max(0.5, interval)
+        if remaining is not None:
+            sleep_for = min(sleep_for, remaining)
+        await asyncio.sleep(sleep_for)
+
+
 async def _open_browser_context(playwright, cdp_url: Optional[str] = None):
     """Open a browser/context pair and return ownership flags for cleanup."""
     if cdp_url:
@@ -688,6 +799,8 @@ async def snipe_task(
     dry_run: bool = False,
     interval: float = 30.0,
     max_duration: float = 0,
+    monitor: bool = False,
+    monitor_duration: float = 15.0,
     release_at=None,
     cdp_url: str = None,
     timezone: str = None,
@@ -720,6 +833,7 @@ async def snipe_task(
             await _interactive_login(context, PAGE_LOAD_TIMEOUT)
 
         resolved_task = task
+        monitor_deadline: Optional[float] = None
         if effective_release_at and launch_newly_released_only:
             scout = await context.new_page()
             opened_pages.append(scout)
@@ -727,17 +841,20 @@ async def snipe_task(
             try:
                 before_dates = await _capture_available_dates(scout, task.url, task.size)
                 await _wait_for_release(effective_release_at, timezone=timezone)
-                after_dates = await _capture_available_dates(scout, task.url, task.size)
+                monitor_deadline = asyncio.get_running_loop().time() + (monitor_duration * 60)
+                eligible_dates = await _monitor_newly_released_dates(
+                    scout,
+                    task,
+                    requested_dates=_requested_dates_from_task(task),
+                    interval=interval,
+                    deadline=monitor_deadline,
+                    baseline_dates=before_dates,
+                )
             finally:
                 await scout.close()
 
-            eligible_dates = _newly_released_dates(
-                before=before_dates,
-                after=after_dates,
-                requested_dates=_requested_dates_from_task(task),
-            )
             if not eligible_dates:
-                log.info("[%s] No newly released eligible dates found.", task.url)
+                log.info("[%s] No newly released eligible dates found before monitoring window expired.", task.url)
                 await _cleanup_browser_session(
                     browser,
                     context,
@@ -747,6 +864,8 @@ async def snipe_task(
                 )
                 return None
             resolved_task = task.filter_dates(eligible_dates)
+        elif monitor:
+            monitor_deadline = asyncio.get_running_loop().time() + (monitor_duration * 60)
 
         # Open one tab per target
         workers: List[DayWorker] = []
@@ -776,15 +895,14 @@ async def snipe_task(
 
         # Run all workers concurrently
         worker_tasks = [asyncio.create_task(w.run()) for w in workers]
-        if max_duration > 0:
-            done, pending = await asyncio.wait(worker_tasks, timeout=max_duration * 60)
-            if pending:
-                log.info("[%s] max-duration %.0fmin reached — stopping.", task.url, max_duration)
-                await _stop_worker_tasks(task.url, found_event, worker_tasks)
-            else:
-                await asyncio.gather(*worker_tasks, return_exceptions=True)
-        else:
-            await asyncio.gather(*worker_tasks, return_exceptions=True)
+        timeout_seconds, timeout_message = _monitor_timeout_message(max_duration, monitor_deadline)
+        await _wait_for_worker_outcome(
+            task.url,
+            found_event,
+            worker_tasks,
+            timeout_seconds=timeout_seconds,
+            timeout_message=timeout_message,
+        )
 
         await _cleanup_browser_session(
             browser,
@@ -810,14 +928,27 @@ async def snipe_task(
     }
 
 
-async def snipe_all(tasks: List[Task], **kwargs) -> List[dict]:
+async def snipe_all(
+    tasks: List[Task],
+    monitor: bool = False,
+    monitor_duration: float = 15.0,
+    **kwargs,
+) -> List[dict]:
     """Run multiple restaurant tasks concurrently, returning a list of result dicts."""
     log.info(
         "Sniping %d restaurant(s) | %d total target-workers",
         len(tasks), sum(len(t.targets) for t in tasks),
     )
     raw = await asyncio.gather(
-        *[snipe_task(t, **kwargs) for t in tasks],
+        *[
+            snipe_task(
+                t,
+                monitor=monitor,
+                monitor_duration=monitor_duration,
+                **kwargs,
+            )
+            for t in tasks
+        ],
         return_exceptions=True,
     )
     results = []
