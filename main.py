@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 
-from models import LaunchConfig, Selector, Task, Target
+from models import LaunchConfig, Selector, Task, Target, expand_date_ranges
 from recon import recon, save_config, load_config
 from sniper import snipe_all
 
@@ -87,12 +87,21 @@ def _collect_inline_values(args: argparse.Namespace, singular_name: str, plural_
 
 
 def _should_use_inline_task(args: argparse.Namespace) -> bool:
-    has_inline_dates = bool(getattr(args, "target", None) or args.date or getattr(args, "dates", None))
+    has_inline_dates = bool(
+        getattr(args, "target", None)
+        or args.date
+        or getattr(args, "dates", None)
+        or getattr(args, "date_ranges", None)
+    )
     has_inline_exact_times = bool(args.exact_time or getattr(args, "exact_times", None))
     is_launch_without_date_preference = bool(
         getattr(args, "release_at", None) and getattr(args, "newly_released_only", False)
     )
-    return has_inline_dates or has_inline_exact_times or is_launch_without_date_preference
+    return (
+        has_inline_dates
+        or has_inline_exact_times
+        or is_launch_without_date_preference
+    )
 
 
 def _build_inline_task(args: argparse.Namespace) -> Task:
@@ -109,6 +118,7 @@ def _build_inline_task(args: argparse.Namespace) -> Task:
         size = target_args[0][3]
     else:
         dates = _collect_inline_values(args, "date", "dates")
+        dates.extend(expand_date_ranges(getattr(args, "date_ranges", None)))
         exact_times = _collect_inline_values(args, "exact_time", "exact_times")
         selectors = [
             Selector(
@@ -128,6 +138,14 @@ def _build_inline_task(args: argparse.Namespace) -> Task:
     return Task(url=args.slug, size=size, selectors=selectors, launch=launch)
 
 
+def _build_inline_task_or_exit(args: argparse.Namespace) -> Task:
+    try:
+        return _build_inline_task(args)
+    except ValueError as exc:
+        log.error("Invalid --date-ranges value: %s", exc)
+        sys.exit(2)
+
+
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 
 async def _cmd_recon(args: argparse.Namespace) -> None:
@@ -142,14 +160,22 @@ async def _cmd_recon(args: argparse.Namespace) -> None:
         print(json.dumps([t.to_dict() for t in tasks], indent=2))
 
 
+def _exit_if_monitoring_not_supported(args: argparse.Namespace) -> None:
+    if getattr(args, "monitor", False):
+        log.error("--monitor is not supported yet; this will be enabled when runtime monitoring lands.")
+        sys.exit(2)
+
+
 async def _cmd_snipe(args: argparse.Namespace) -> None:
+    _exit_if_monitoring_not_supported(args)
+
     if args.config:
         tasks = load_config(args.config)
     elif _should_use_inline_task(args):
         if not args.slug:
             log.error("Inline targeting requires a restaurant slug as positional argument")
             sys.exit(2)
-        tasks = [_build_inline_task(args)]
+        tasks = [_build_inline_task_or_exit(args)]
     else:
         log.error(
             "Provide --config FILE, --target ..., at least one --date/--dates, "
@@ -177,8 +203,10 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
 
 
 async def _cmd_run(args: argparse.Namespace) -> None:
+    _exit_if_monitoring_not_supported(args)
+
     if _should_use_inline_task(args):
-        tasks = [_build_inline_task(args)]
+        tasks = [_build_inline_task_or_exit(args)]
     else:
         tasks = await recon(args.slug, size=args.size)
         if not tasks:
@@ -234,6 +262,8 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Exact reservation start time, e.g. '5:15 PM' (repeatable)")
     p_snipe.add_argument("--dates",
                          help="Comma-separated target dates, e.g. '2026-05-27,2026-05-28'")
+    p_snipe.add_argument("--date-ranges",
+                         help="Comma-separated date ranges, e.g. '2026-05-07:2026-05-09,2026-05-21:2026-05-25'")
     p_snipe.add_argument("--exact-times",
                          help="Comma-separated exact times, e.g. '5:15 PM,7:45 PM'")
     p_snipe.add_argument("--dry-run", action="store_true", help="Find slots but don't click")
@@ -241,6 +271,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Poll interval in seconds (default: 30)")
     p_snipe.add_argument("--max-duration", type=float, default=0, metavar="MINUTES",
                          help="Stop after this many minutes (0 = unlimited)")
+    p_snipe.add_argument("--monitor", action="store_true",
+                         help="Keep polling for cancellations/restocks instead of exiting after one pass")
+    p_snipe.add_argument("--monitor-duration", type=float, default=15.0, metavar="MINUTES",
+                         help="Monitoring duration in minutes (default: 15)")
     p_snipe.add_argument("--release-at", metavar="HH:MM",
                          help="Start sniping at this time of day")
     p_snipe.add_argument("--cdp-url",
@@ -268,6 +302,8 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Exact reservation start time, e.g. '5:15 PM' (repeatable)")
     p_run.add_argument("--dates",
                        help="Comma-separated target dates, e.g. '2026-05-27,2026-05-28'")
+    p_run.add_argument("--date-ranges",
+                      help="Comma-separated date ranges, e.g. '2026-05-07:2026-05-09,2026-05-21:2026-05-25'")
     p_run.add_argument("--exact-times",
                        help="Comma-separated exact times, e.g. '5:15 PM,7:45 PM'")
     p_run.add_argument("--dry-run", action="store_true", help="Find slots but don't click")
@@ -276,6 +312,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Poll interval in seconds (default: 30)")
     p_run.add_argument("--max-duration", type=float, default=0, metavar="MINUTES",
                        help="Stop after this many minutes (0 = unlimited)")
+    p_run.add_argument("--monitor", action="store_true",
+                      help="Keep polling for cancellations/restocks instead of exiting after one pass")
+    p_run.add_argument("--monitor-duration", type=float, default=15.0, metavar="MINUTES",
+                      help="Monitoring duration in minutes (default: 15)")
     p_run.add_argument("--release-at", metavar="HH:MM",
                        help="Start sniping at this time of day")
     p_run.add_argument("--cdp-url",
