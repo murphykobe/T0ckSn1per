@@ -70,7 +70,7 @@ If `ANTHROPIC_API_KEY` is set, Claude will refine the time window. Otherwise a b
 
 ### `snipe` — snipe from a saved config or inline targets
 
-Loads a JSON config from `recon`, or accepts inline `--target` flags, compact `--date` lists, and optional deterministic `--exact-time` values.
+Loads a JSON config from `recon`, or accepts inline `--target` flags, compact `--dates` lists, and optional deterministic `--exact-times` values.
 
 ```bash
 # Live snipe from a config file
@@ -83,10 +83,8 @@ python main.py snipe canlis \
 
 # Compact deterministic mode: try exact start times on a list of dates
 python main.py snipe taneda \
-  --date 2026-06-17 \
-  --date 2026-06-18 \
-  --exact-time "5:15 PM" \
-  --exact-time "7:45 PM"
+  --dates 2026-06-17,2026-06-18 \
+  --exact-times "5:15 PM,7:45 PM"
 
 # Dry-run: finds slots but does not click them
 python main.py snipe --config canlis.json --dry-run
@@ -115,10 +113,8 @@ python main.py run taneda \
   --size 2 \
   --release-at 11:00 \
   --newly-released-only \
-  --date 2026-06-17 \
-  --date 2026-06-18 \
-  --exact-time "5:15 PM" \
-  --exact-time "7:45 PM"
+  --dates 2026-06-17,2026-06-18 \
+  --exact-times "5:15 PM,7:45 PM"
 
 # Dry-run with custom interval
 python main.py run canlis --size 2 --dry-run --interval 15
@@ -126,7 +122,7 @@ python main.py run canlis --size 2 --dry-run --interval 15
 
 `--release-at` uses local machine time by default. `--timezone` remains available as an advanced override, but most local runs do not need it.
 
-The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--newly-released-only`, `--date`, `--exact-time`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
+The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--newly-released-only`, `--dates`, `--exact-times`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
 
 ---
 
@@ -186,8 +182,10 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 | Flag              | Description                                                        |
 |-------------------|--------------------------------------------------------------------|
 | `--target DATE EARLIEST LATEST SIZE` | Inline target (repeatable). Example: `--target 2026-03-14 "5:00 PM" "9:30 PM" 2` |
-| `--date YYYY-MM-DD` | Compact date filter (repeatable) |
-| `--exact-time "H:MM AM/PM"` | Deterministic exact start time (repeatable) |
+| `--dates YYYY-MM-DD,YYYY-MM-DD` | Comma-separated compact date filter |
+| `--exact-times "H:MM AM/PM,H:MM AM/PM"` | Comma-separated deterministic exact start times |
+| `--date YYYY-MM-DD` | Legacy repeatable date flag, still supported |
+| `--exact-time "H:MM AM/PM"` | Legacy repeatable exact-time flag, still supported |
 | `--config FILE`   | JSON config file from `recon`                                      |
 | `--interval SECONDS` | Poll interval in seconds (default: 30)                          |
 | `--max-duration MINUTES` | Stop after this many minutes (0 = unlimited)                |
