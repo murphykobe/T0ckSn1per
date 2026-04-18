@@ -2,10 +2,30 @@
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 RESERVATION_TIME_FORMAT = "%I:%M %p"
+
+
+def expand_date_ranges(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+
+    expanded: List[str] = []
+    for part in [piece.strip() for piece in raw.split(",") if piece.strip()]:
+        start_s, end_s = [token.strip() for token in part.split(":", 1)]
+        start = datetime.strptime(start_s, "%Y-%m-%d").date()
+        end = datetime.strptime(end_s, "%Y-%m-%d").date()
+        if end < start:
+            raise ValueError(f"Invalid date range: {part}")
+
+        cursor = start
+        while cursor <= end:
+            expanded.append(cursor.isoformat())
+            cursor += timedelta(days=1)
+
+    return expanded
 
 
 @dataclass
