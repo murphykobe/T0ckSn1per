@@ -539,6 +539,148 @@ def test_newly_released_dates_applies_delta_and_filter():
     assert result == ["2026-06-17"]
 
 
+@pytest.mark.asyncio
+async def test_open_browser_context_uses_cdp_when_url_provided():
+    from sniper import _open_browser_context
+
+    playwright = AsyncMock()
+    remote_browser = AsyncMock()
+    existing_context = AsyncMock()
+    remote_browser.contexts = [existing_context]
+    playwright.chromium.connect_over_cdp = AsyncMock(return_value=remote_browser)
+
+    browser, context, owns_browser, owns_context = await _open_browser_context(
+        playwright,
+        cdp_url="http://127.0.0.1:9222",
+    )
+
+    playwright.chromium.connect_over_cdp.assert_awaited_once_with("http://127.0.0.1:9222")
+    assert browser is remote_browser
+    assert context is existing_context
+    assert owns_browser is False
+    assert owns_context is False
+
+
+@pytest.mark.asyncio
+async def test_open_browser_context_launches_browser_when_cdp_missing():
+    from sniper import _open_browser_context
+
+    playwright = AsyncMock()
+    browser = AsyncMock()
+    context = AsyncMock()
+    playwright.chromium.launch = AsyncMock(return_value=browser)
+    browser.new_context = AsyncMock(return_value=context)
+
+    opened_browser, opened_context, owns_browser, owns_context = await _open_browser_context(
+        playwright,
+        cdp_url=None,
+    )
+
+    playwright.chromium.launch.assert_awaited()
+    browser.new_context.assert_awaited()
+    assert opened_browser is browser
+    assert opened_context is context
+    assert owns_browser is True
+    assert owns_context is True
+
+
+class _FakePlaywrightContextManager:
+    def __init__(self, playwright):
+        self._playwright = playwright
+
+    async def __aenter__(self):
+        return self._playwright
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_snipe_task_cancels_workers_before_browser_close():
+    from sniper import snipe_task
+
+    order = []
+    browser = AsyncMock()
+    context = AsyncMock()
+    page = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    async def _close_browser():
+        order.append("browser.close")
+
+    browser.close = AsyncMock(side_effect=_close_browser)
+
+    class FakeWorker:
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.checkout_url = None
+
+        async def run(self):
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                order.append("worker.cancelled")
+                raise
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, True, True))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper.DayWorker", FakeWorker):
+                    task = Task(url="alinea", size="2", selectors=[
+                        Selector(
+                            dates=["2026-03-15"],
+                            earliest_time="5:00 PM",
+                            latest_time="9:30 PM",
+                        ),
+                    ])
+
+                    result = await snipe_task(task, dry_run=True, max_duration=0.001)
+
+    assert result is None
+    assert order == ["worker.cancelled", "browser.close"]
+
+
+@pytest.mark.asyncio
+async def test_snipe_task_does_not_close_attached_cdp_browser():
+    from sniper import snipe_task
+
+    browser = AsyncMock()
+    context = AsyncMock()
+    page = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    class FakeWorker:
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.checkout_url = None
+
+        async def run(self):
+            return None
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, False, False))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper.DayWorker", FakeWorker):
+                    task = Task(url="alinea", size="2", selectors=[
+                        Selector(
+                            dates=["2026-03-15"],
+                            earliest_time="5:00 PM",
+                            latest_time="9:30 PM",
+                        ),
+                    ])
+
+                    result = await snipe_task(task, dry_run=True, max_duration=0.001)
+
+    assert result is None
+    browser.close.assert_not_awaited()
+    context.close.assert_not_awaited()
+    page.close.assert_not_awaited()
+
+
 # ── _poll() with __NEXT_DATA__ pre-filter tests ─────────────────────────────
 
 class TestPollWithNextData:
@@ -594,6 +736,28 @@ class TestPollWithNextData:
 
         assert result is True
         worker._try_day.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_selector_until_stop_exits_when_found_event_set():
+    from playwright.async_api import TimeoutError as PWTimeout
+
+    page = AsyncMock()
+    worker = _make_worker(page=page)
+
+    async def _wait_side_effect(*args, **kwargs):
+        worker.found_event.set()
+        raise PWTimeout("not yet")
+
+    page.wait_for_selector = AsyncMock(side_effect=_wait_side_effect)
+
+    result = await worker._wait_for_selector_until_stop(
+        "div.ConsumerCalendar-month",
+        timeout_ms=1_000,
+        step_ms=10,
+    )
+
+    assert result is False
 
     @pytest.mark.asyncio
     async def test_poll_falls_back_to_dom_when_next_data_unavailable(self):

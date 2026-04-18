@@ -28,6 +28,12 @@ playwright install chromium
 
 This installs a `t0cksn1per` CLI command. You can also run directly with `python main.py`.
 
+For one-off runs without cloning or creating a venv first, you can execute the repo directly with `uvx`:
+
+```bash
+uvx --from git+https://github.com/murphykobe/T0ckSn1per t0cksn1per --help
+```
+
 All subsequent commands assume the venv is active (or use `venv/bin/python3` / `venv/bin/pytest` directly).
 
 ---
@@ -116,6 +122,15 @@ python main.py run taneda \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM"
 
+# Attach to an existing local Chrome via CDP instead of launching a managed browser
+python main.py run taneda \
+  --size 2 \
+  --release-at 11:00 \
+  --newly-released-only \
+  --dates 2026-06-17,2026-06-18 \
+  --exact-times "5:15 PM,7:45 PM" \
+  --cdp-url http://127.0.0.1:9222
+
 # Dry-run with custom interval
 python main.py run canlis --size 2 --dry-run --interval 15
 ```
@@ -123,6 +138,51 @@ python main.py run canlis --size 2 --dry-run --interval 15
 `--release-at` uses local machine time by default. `--timezone` remains available as an advanced override, but most local runs do not need it.
 
 The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--newly-released-only`, `--dates`, `--exact-times`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
+
+---
+
+## OpenClaw Skill
+
+This repo includes an OpenClaw-ready skill at `.agents/skills/tock-sniper/SKILL.md`.
+
+- use local plus headed mode when you want the browser on your Mac
+- use node plus headless mode for unattended polling
+- use CDP only when you explicitly want to attach to an existing local Chrome
+
+The skill shells out to the repo CLI instead of reimplementing reservation logic:
+
+```bash
+uvx --from git+https://github.com/murphykobe/T0ckSn1per t0cksn1per --help
+```
+
+---
+
+## CDP Mode
+
+CDP is an advanced local-only mode for "use my existing Chrome on this Mac" workflows.
+
+Start Chrome with remote debugging enabled:
+
+```bash
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/tocksn1per-cdp
+```
+
+Then point `t0cksn1per` at that browser:
+
+```bash
+PLAYWRIGHT_HEADLESS=0 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
+  t0cksn1per run taneda \
+  --size 2 \
+  --release-at 11:00 \
+  --newly-released-only \
+  --dates 2026-06-17,2026-06-18 \
+  --exact-times "5:15 PM,7:45 PM" \
+  --cdp-url http://127.0.0.1:9222
+```
+
+If `--cdp-url` is omitted, the CLI keeps using its normal Playwright-managed browser.
 
 ---
 
@@ -190,6 +250,7 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 | `--interval SECONDS` | Poll interval in seconds (default: 30)                          |
 | `--max-duration MINUTES` | Stop after this many minutes (0 = unlimited)                |
 | `--release-at HH:MM` | Start sniping at this local machine time                       |
+| `--cdp-url URL`   | Advanced: connect to an existing Chrome/Chromium CDP endpoint     |
 | `--newly-released-only` | In launch mode, target only dates that appear after release |
 | `--timezone TZ`   | Optional advanced override for `--release-at`                      |
 | `--cookies-file FILE` | Path to Netscape cookies file for authentication               |
