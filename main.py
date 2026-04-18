@@ -154,6 +154,7 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
         interval=args.interval,
         max_duration=args.max_duration,
         release_at=getattr(args, "release_at", None),
+        cdp_url=getattr(args, "cdp_url", None),
         timezone=getattr(args, "timezone", None),
         cookies_file=getattr(args, "cookies_file", None),
         interactive_login=getattr(args, "login", False),
@@ -178,6 +179,7 @@ async def _cmd_run(args: argparse.Namespace) -> None:
         interval=args.interval,
         max_duration=args.max_duration,
         release_at=getattr(args, "release_at", None),
+        cdp_url=getattr(args, "cdp_url", None),
         timezone=getattr(args, "timezone", None),
         cookies_file=getattr(args, "cookies_file", None),
         interactive_login=getattr(args, "login", False),
@@ -229,6 +231,8 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Stop after this many minutes (0 = unlimited)")
     p_snipe.add_argument("--release-at", metavar="HH:MM",
                          help="Start sniping at this time of day")
+    p_snipe.add_argument("--cdp-url",
+                         help="Advanced: connect to an existing Chrome/Chromium CDP endpoint")
     p_snipe.add_argument("--newly-released-only", action="store_true",
                          help="In launch mode, only target dates that appear after release")
     p_snipe.add_argument("--timezone", metavar="TZ",
@@ -262,6 +266,8 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Stop after this many minutes (0 = unlimited)")
     p_run.add_argument("--release-at", metavar="HH:MM",
                        help="Start sniping at this time of day")
+    p_run.add_argument("--cdp-url",
+                       help="Advanced: connect to an existing Chrome/Chromium CDP endpoint")
     p_run.add_argument("--newly-released-only", action="store_true",
                        help="In launch mode, only target dates that appear after release")
     p_run.add_argument("--timezone", metavar="TZ",

@@ -97,3 +97,18 @@ def test_parser_keeps_legacy_singular_flags_working():
             "exact_times": ["5:15 PM", "7:45 PM"],
         }
     ]
+
+
+def test_parser_accepts_cdp_url_for_run():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--size", "3",
+        "--dates", "2026-05-27,2026-05-28",
+        "--exact-times", "5:15 PM,7:45 PM",
+        "--cdp-url", "http://127.0.0.1:9222",
+    ])
+
+    assert args.cdp_url == "http://127.0.0.1:9222"

@@ -53,6 +53,7 @@ PAGE_LOAD_TIMEOUT  = 15_000    # ms
 SLOT_WAIT_TIMEOUT  = 8_000     # ms — wait for time slots after clicking a day
 BROWSER_HOLD_SEC   = 600       # keep browser alive after securing cart (10 min)
 LAUNCH_STAGGER_SEC = 0.5       # delay between spinning up worker tabs
+SHUTDOWN_GRACE_SEC = 5.0       # allow in-flight polls to settle before force-cancel
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -214,6 +215,62 @@ def _newly_released_dates(
     return eligible
 
 
+async def _open_browser_context(playwright, cdp_url: Optional[str] = None):
+    """Open a browser/context pair and return ownership flags for cleanup."""
+    if cdp_url:
+        browser = await playwright.chromium.connect_over_cdp(cdp_url)
+        if browser.contexts:
+            return browser, browser.contexts[0], False, False
+        context = await browser.new_context(user_agent=USER_AGENT)
+        return browser, context, False, True
+
+    launch_kwargs: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
+    if CHROME_EXECUTABLE:
+        launch_kwargs["executable_path"] = CHROME_EXECUTABLE
+    browser: Browser = await playwright.chromium.launch(**launch_kwargs)
+    context: BrowserContext = await browser.new_context(user_agent=USER_AGENT)
+    return browser, context, True, True
+
+
+async def _cleanup_browser_session(
+    browser: Browser,
+    context: BrowserContext,
+    pages: list,
+    owns_browser: bool,
+    owns_context: bool,
+) -> None:
+    """Close only the resources owned by this run."""
+    if owns_browser:
+        await browser.close()
+        return
+
+    if owns_context:
+        await context.close()
+        return
+
+    # In CDP attach mode we intentionally leave the user's browser/context open.
+    # Exiting Playwright disconnects the session; force-closing attached pages can
+    # race with in-flight protocol work and surface noisy TargetClosedError logs.
+
+
+async def _stop_worker_tasks(task_url: str, found_event: asyncio.Event, worker_tasks: list) -> None:
+    """Request a graceful stop, then cancel only if workers fail to settle."""
+    found_event.set()
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*worker_tasks, return_exceptions=True),
+            timeout=SHUTDOWN_GRACE_SEC,
+        )
+        return
+    except asyncio.TimeoutError:
+        log.debug("[%s] Worker shutdown grace period elapsed — cancelling remaining tasks.", task_url)
+
+    for worker_task in worker_tasks:
+        if not worker_task.done():
+            worker_task.cancel()
+    await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+
 # ── Stealth helper ────────────────────────────────────────────────────────────
 
 async def _apply_stealth(page: Page) -> None:
@@ -251,6 +308,25 @@ class DayWorker:
         self.prompt_login = prompt_login
         self.checkout_url: Optional[str] = None
         self.matched_time: Optional[str] = None
+
+    async def _wait_for_selector_until_stop(
+        self,
+        selector: str,
+        timeout_ms: int,
+        step_ms: int = 500,
+    ) -> bool:
+        """Wait for a selector, but bail out quickly once shutdown is requested."""
+        deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+        while not self.found_event.is_set():
+            remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
+            if remaining_ms <= 0:
+                raise PWTimeout(f"Timeout waiting for selector: {selector}")
+            try:
+                await self.page.wait_for_selector(selector, timeout=min(step_ms, remaining_ms))
+                return True
+            except PWTimeout:
+                continue
+        return False
 
     async def run(self) -> None:
         log.info(
@@ -329,10 +405,12 @@ class DayWorker:
             )
 
         try:
-            await self.page.wait_for_selector(
+            calendar_ready = await self._wait_for_selector_until_stop(
                 "div.ConsumerCalendar-month",
-                timeout=PAGE_LOAD_TIMEOUT,
+                timeout_ms=PAGE_LOAD_TIMEOUT,
             )
+            if not calendar_ready:
+                return False
         except PWTimeout:
             log.debug("[%s/%s] Calendar selector timeout, retrying", self.task.url, self.target.date)
             return False
@@ -371,10 +449,12 @@ class DayWorker:
           data-testid="booking-card-button"    — the Book action button
         """
         try:
-            await self.page.wait_for_selector(
+            results_ready = await self._wait_for_selector_until_stop(
                 "[data-testid='search-result']",
-                timeout=SLOT_WAIT_TIMEOUT,
+                timeout_ms=SLOT_WAIT_TIMEOUT,
             )
+            if not results_ready:
+                return False
             cards = await self.page.query_selector_all("[data-testid='search-result']")
             for card in cards:
                 time_el = await card.query_selector("[data-testid='search-result-time']")
@@ -609,6 +689,7 @@ async def snipe_task(
     interval: float = 30.0,
     max_duration: float = 0,
     release_at=None,
+    cdp_url: str = None,
     timezone: str = None,
     cookies_file=None,
     interactive_login: bool = False,
@@ -627,11 +708,11 @@ async def snipe_task(
     )
 
     async with async_playwright() as p:
-        _launch_kwargs: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
-        if CHROME_EXECUTABLE:
-            _launch_kwargs["executable_path"] = CHROME_EXECUTABLE
-        browser: Browser = await p.chromium.launch(**_launch_kwargs)
-        context: BrowserContext = await browser.new_context(user_agent=USER_AGENT)
+        browser, context, owns_browser, owns_context = await _open_browser_context(
+            p,
+            cdp_url=cdp_url,
+        )
+        opened_pages: list = []
 
         if cookies_file:
             await _load_cookies(context, cookies_file)
@@ -641,6 +722,7 @@ async def snipe_task(
         resolved_task = task
         if effective_release_at and launch_newly_released_only:
             scout = await context.new_page()
+            opened_pages.append(scout)
             await _apply_stealth(scout)
             try:
                 before_dates = await _capture_available_dates(scout, task.url, task.size)
@@ -656,7 +738,13 @@ async def snipe_task(
             )
             if not eligible_dates:
                 log.info("[%s] No newly released eligible dates found.", task.url)
-                await browser.close()
+                await _cleanup_browser_session(
+                    browser,
+                    context,
+                    opened_pages,
+                    owns_browser=owns_browser,
+                    owns_context=owns_context,
+                )
                 return None
             resolved_task = task.filter_dates(eligible_dates)
 
@@ -665,6 +753,7 @@ async def snipe_task(
         expanded_targets = resolved_task.expand_targets()
         for i, target in enumerate(expanded_targets):
             page = await context.new_page()
+            opened_pages.append(page)
             await _apply_stealth(page)
             workers.append(DayWorker(resolved_task, target, page, found_event, dry_run=dry_run, interval=interval, prompt_login=prompt_login))
             if i < len(expanded_targets) - 1:
@@ -686,19 +775,24 @@ async def snipe_task(
             await _wait_for_release(effective_release_at, timezone=timezone)
 
         # Run all workers concurrently
-        timed_out = False
-        gather_coro = asyncio.gather(*[w.run() for w in workers], return_exceptions=True)
+        worker_tasks = [asyncio.create_task(w.run()) for w in workers]
         if max_duration > 0:
-            try:
-                await asyncio.wait_for(gather_coro, timeout=max_duration * 60)
-            except asyncio.TimeoutError:
+            done, pending = await asyncio.wait(worker_tasks, timeout=max_duration * 60)
+            if pending:
                 log.info("[%s] max-duration %.0fmin reached — stopping.", task.url, max_duration)
-                timed_out = True
-                found_event.set()  # signal all workers to stop their loops
+                await _stop_worker_tasks(task.url, found_event, worker_tasks)
+            else:
+                await asyncio.gather(*worker_tasks, return_exceptions=True)
         else:
-            await gather_coro
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
 
-        await browser.close()
+        await _cleanup_browser_session(
+            browser,
+            context,
+            opened_pages,
+            owns_browser=owns_browser,
+            owns_context=owns_context,
+        )
 
     # Check if any worker actually found a slot (not just timed out)
     winning_worker = next(
