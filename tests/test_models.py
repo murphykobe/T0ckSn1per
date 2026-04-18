@@ -56,3 +56,97 @@ def test_task_empty_targets():
     task = Task(url="taneda", size="2")
     assert task.targets == []
     assert task.to_dict() == {"url": "taneda", "size": "2", "targets": []}
+
+
+def test_selector_expands_dates_and_exact_times():
+    from models import Selector
+
+    selector = Selector(
+        dates=["2026-06-17", "2026-06-18"],
+        exact_times=["5:15 PM", "7:45 PM"],
+    )
+
+    targets = selector.expand_targets()
+
+    assert [(t.date, t.exact_time) for t in targets] == [
+        ("2026-06-17", "5:15 PM"),
+        ("2026-06-17", "7:45 PM"),
+        ("2026-06-18", "5:15 PM"),
+        ("2026-06-18", "7:45 PM"),
+    ]
+    assert all(t.earliest_time == t.latest_time for t in targets)
+
+
+def test_task_from_dict_accepts_selector_shape():
+    task = Task.from_dict({
+        "url": "taneda",
+        "size": "2",
+        "launch": {"release_at": "11:00", "newly_released_only": True},
+        "selectors": [
+            {
+                "dates": ["2026-06-17"],
+                "exact_times": ["5:15 PM", "7:45 PM"],
+            }
+        ],
+    })
+
+    assert task.launch is not None
+    assert task.launch.release_at == "11:00"
+    assert task.launch.newly_released_only is True
+    assert len(task.expand_targets()) == 2
+
+
+def test_task_from_dict_translates_legacy_targets():
+    task = Task.from_dict({
+        "url": "canlis",
+        "size": "2",
+        "targets": [
+            {
+                "date": "2026-03-15",
+                "earliest_time": "5:00 PM",
+                "latest_time": "9:30 PM",
+            }
+        ],
+    })
+
+    selector = task.selectors[0]
+    assert selector.dates == ["2026-03-15"]
+    assert selector.earliest_time == "5:00 PM"
+    assert selector.latest_time == "9:30 PM"
+
+
+def test_task_inline_selector_defaults_to_any_time_when_exact_times_missing():
+    from models import Selector
+
+    task = Task(
+        url="taneda",
+        size="2",
+        selectors=[Selector(dates=["2026-06-17"])],
+    )
+
+    targets = task.expand_targets()
+
+    assert len(targets) == 1
+    assert targets[0].date == "2026-06-17"
+    assert targets[0].earliest_time == "12:00 PM"
+    assert targets[0].latest_time == "11:00 PM"
+
+
+def test_task_filter_dates_preserves_exact_times():
+    from models import Selector
+
+    task = Task(
+        url="taneda",
+        size="2",
+        selectors=[
+            Selector(
+                dates=["2026-06-17", "2026-06-18"],
+                exact_times=["5:15 PM", "7:45 PM"],
+            )
+        ],
+    )
+
+    filtered = task.filter_dates(["2026-06-18"])
+
+    assert [t.date for t in filtered.expand_targets()] == ["2026-06-18", "2026-06-18"]
+    assert [t.exact_time for t in filtered.expand_targets()] == ["5:15 PM", "7:45 PM"]
