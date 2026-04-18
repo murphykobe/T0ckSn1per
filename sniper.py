@@ -26,7 +26,7 @@ import os
 import random
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
@@ -213,6 +213,11 @@ def _newly_released_dates(
         allowed = set(requested_dates)
         eligible = [date for date in eligible if date in allowed]
     return eligible
+
+
+def _default_launch_window_dates(days: int = 30) -> list:
+    today = datetime.now().date()
+    return [(today + timedelta(days=offset)).isoformat() for offset in range(days)]
 
 
 def _remaining_deadline_seconds(deadline: Optional[float]) -> Optional[float]:
@@ -838,6 +843,7 @@ async def snipe_task(
             scout = await context.new_page()
             opened_pages.append(scout)
             await _apply_stealth(scout)
+            requested_dates = _requested_dates_from_task(task) or _default_launch_window_dates()
             try:
                 before_dates = await _capture_available_dates(scout, task.url, task.size)
                 await _wait_for_release(effective_release_at, timezone=timezone)
@@ -845,7 +851,7 @@ async def snipe_task(
                 eligible_dates = await _monitor_newly_released_dates(
                     scout,
                     task,
-                    requested_dates=_requested_dates_from_task(task),
+                    requested_dates=requested_dates,
                     interval=interval,
                     deadline=monitor_deadline,
                     baseline_dates=before_dates,
