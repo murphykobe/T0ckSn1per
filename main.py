@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 
-from models import Task, Target
+from models import LaunchConfig, Selector, Task, Target
 from recon import recon, save_config, load_config
 from sniper import snipe_all
 
@@ -74,6 +74,36 @@ def _print_results(results: list, json_mode: bool) -> None:
         sys.exit(1)
 
 
+def _build_inline_task(args: argparse.Namespace) -> Task:
+    if args.target:
+        selectors = [
+            Selector(
+                dates=[date],
+                earliest_time=earliest,
+                latest_time=latest,
+            )
+            for date, earliest, latest, _size in args.target
+        ]
+        size = args.target[0][3]
+    else:
+        selectors = [
+            Selector(
+                dates=list(getattr(args, "date", []) or []),
+                exact_times=list(getattr(args, "exact_time", []) or []),
+            )
+        ]
+        size = args.size
+
+    launch = None
+    if getattr(args, "release_at", None):
+        launch = LaunchConfig(
+            release_at=args.release_at,
+            newly_released_only=getattr(args, "newly_released_only", False),
+        )
+
+    return Task(url=args.slug, size=size, selectors=selectors, launch=launch)
+
+
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 
 async def _cmd_recon(args: argparse.Namespace) -> None:
@@ -91,17 +121,13 @@ async def _cmd_recon(args: argparse.Namespace) -> None:
 async def _cmd_snipe(args: argparse.Namespace) -> None:
     if args.config:
         tasks = load_config(args.config)
-    elif args.target:
+    elif args.target or args.date:
         if not args.slug:
-            log.error("--target requires a restaurant slug as positional argument")
+            log.error("Inline targeting requires a restaurant slug as positional argument")
             sys.exit(2)
-        targets = [
-            Target(date=t[0], earliest_time=t[1], latest_time=t[2])
-            for t in args.target
-        ]
-        tasks = [Task(url=args.slug, size=args.target[0][3], targets=targets)]
+        tasks = [_build_inline_task(args)]
     else:
-        log.error("Provide --config FILE or --target DATE EARLIEST LATEST SIZE")
+        log.error("Provide --config FILE, --target ..., or at least one --date")
         sys.exit(2)
 
     if not tasks:
@@ -123,12 +149,15 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
 
 
 async def _cmd_run(args: argparse.Namespace) -> None:
-    tasks = await recon(args.slug, size=args.size)
-    if not tasks:
-        log.warning("Recon found no availability for '%s'. Nothing to snipe.", args.slug)
-        sys.exit(1)
-    if args.save:
-        save_config(tasks, args.save)
+    if args.date or args.exact_time:
+        tasks = [_build_inline_task(args)]
+    else:
+        tasks = await recon(args.slug, size=args.size)
+        if not tasks:
+            log.warning("Recon found no availability for '%s'. Nothing to snipe.", args.slug)
+            sys.exit(1)
+        if args.save:
+            save_config(tasks, args.save)
     snipe_kwargs = dict(
         dry_run=args.dry_run,
         interval=args.interval,
@@ -161,7 +190,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # snipe
     p_snipe = sub.add_parser("snipe", help="Snipe using a config file or inline targets")
     p_snipe.add_argument("slug", nargs="?", default=None,
-                         help="Tock restaurant slug (required when using --target)")
+                         help="Tock restaurant slug (required for inline targeting)")
     p_snipe.add_argument("--config", metavar="FILE", help="JSON config from recon")
     p_snipe.add_argument(
         "--target",
@@ -170,6 +199,10 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar=("DATE", "EARLIEST", "LATEST", "SIZE"),
         help="Inline target: DATE EARLIEST LATEST SIZE (repeatable)",
     )
+    p_snipe.add_argument("--date", action="append", default=[],
+                         help="Target calendar date YYYY-MM-DD (repeatable)")
+    p_snipe.add_argument("--exact-time", action="append", default=[],
+                         help="Exact reservation start time, e.g. '5:15 PM' (repeatable)")
     p_snipe.add_argument("--dry-run", action="store_true", help="Find slots but don't click")
     p_snipe.add_argument("--interval", type=float, default=30.0, metavar="SECONDS",
                          help="Poll interval in seconds (default: 30)")
@@ -177,6 +210,8 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Stop after this many minutes (0 = unlimited)")
     p_snipe.add_argument("--release-at", metavar="HH:MM",
                          help="Start sniping at this time of day")
+    p_snipe.add_argument("--newly-released-only", action="store_true",
+                         help="In launch mode, only target dates that appear after release")
     p_snipe.add_argument("--timezone", metavar="TZ",
                          help="Timezone for --release-at (e.g. America/Chicago)")
     p_snipe.add_argument("--cookies-file", metavar="FILE",
@@ -192,6 +227,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Recon then snipe in one shot")
     p_run.add_argument("slug", help="Tock restaurant slug, e.g. 'canlis'")
     p_run.add_argument("--size", default="2", help="Party size (default: 2)")
+    p_run.add_argument("--date", action="append", default=[],
+                       help="Target calendar date YYYY-MM-DD (repeatable)")
+    p_run.add_argument("--exact-time", action="append", default=[],
+                       help="Exact reservation start time, e.g. '5:15 PM' (repeatable)")
     p_run.add_argument("--dry-run", action="store_true", help="Find slots but don't click")
     p_run.add_argument("--save", metavar="FILE", help="Also save recon config to JSON")
     p_run.add_argument("--interval", type=float, default=30.0, metavar="SECONDS",
@@ -200,6 +239,8 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Stop after this many minutes (0 = unlimited)")
     p_run.add_argument("--release-at", metavar="HH:MM",
                        help="Start sniping at this time of day")
+    p_run.add_argument("--newly-released-only", action="store_true",
+                       help="In launch mode, only target dates that appear after release")
     p_run.add_argument("--timezone", metavar="TZ",
                        help="Timezone for --release-at (e.g. America/Chicago)")
     p_run.add_argument("--cookies-file", metavar="FILE",
