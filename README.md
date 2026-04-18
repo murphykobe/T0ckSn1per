@@ -70,7 +70,7 @@ If `ANTHROPIC_API_KEY` is set, Claude will refine the time window. Otherwise a b
 
 ### `snipe` — snipe from a saved config or inline targets
 
-Loads a JSON config from `recon`, or accepts inline `--target` flags, and starts polling immediately.
+Loads a JSON config from `recon`, or accepts inline `--target` flags, compact `--dates` lists, and optional deterministic `--exact-times` values.
 
 ```bash
 # Live snipe from a config file
@@ -80,6 +80,11 @@ python main.py snipe --config canlis.json
 python main.py snipe canlis \
   --target 2026-03-14 "5:00 PM" "9:30 PM" 2 \
   --target 2026-03-21 "5:00 PM" "9:30 PM" 2
+
+# Compact deterministic mode: try exact start times on a list of dates
+python main.py snipe taneda \
+  --dates 2026-06-17,2026-06-18 \
+  --exact-times "5:15 PM,7:45 PM"
 
 # Dry-run: finds slots but does not click them
 python main.py snipe --config canlis.json --dry-run
@@ -100,14 +105,24 @@ python main.py run canlis --size 2
 # Also save the discovered config
 python main.py run canlis --size 2 --save canlis.json
 
-# Release mode: wait until 10:00 AM Chicago time, then fire
-python main.py run canlis --size 2 --release-at 10:00 --timezone America/Chicago
+# Release mode: wait until 11:00 in local machine time, then fire
+python main.py run canlis --size 2 --release-at 11:00
+
+# Taneda-style launch mode: only target newly released dates and hit exact slots
+python main.py run taneda \
+  --size 2 \
+  --release-at 11:00 \
+  --newly-released-only \
+  --dates 2026-06-17,2026-06-18 \
+  --exact-times "5:15 PM,7:45 PM"
 
 # Dry-run with custom interval
 python main.py run canlis --size 2 --dry-run --interval 15
 ```
 
-The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
+`--release-at` uses local machine time by default. `--timezone` remains available as an advanced override, but most local runs do not need it.
+
+The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--newly-released-only`, `--dates`, `--exact-times`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
 
 ---
 
@@ -167,11 +182,16 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 | Flag              | Description                                                        |
 |-------------------|--------------------------------------------------------------------|
 | `--target DATE EARLIEST LATEST SIZE` | Inline target (repeatable). Example: `--target 2026-03-14 "5:00 PM" "9:30 PM" 2` |
+| `--dates YYYY-MM-DD,YYYY-MM-DD` | Comma-separated compact date filter |
+| `--exact-times "H:MM AM/PM,H:MM AM/PM"` | Comma-separated deterministic exact start times |
+| `--date YYYY-MM-DD` | Legacy repeatable date flag, still supported |
+| `--exact-time "H:MM AM/PM"` | Legacy repeatable exact-time flag, still supported |
 | `--config FILE`   | JSON config file from `recon`                                      |
 | `--interval SECONDS` | Poll interval in seconds (default: 30)                          |
 | `--max-duration MINUTES` | Stop after this many minutes (0 = unlimited)                |
-| `--release-at HH:MM` | Start sniping at this time of day                               |
-| `--timezone TZ`   | Timezone for `--release-at` (e.g. `America/Chicago`)               |
+| `--release-at HH:MM` | Start sniping at this local machine time                       |
+| `--newly-released-only` | In launch mode, target only dates that appear after release |
+| `--timezone TZ`   | Optional advanced override for `--release-at`                      |
 | `--cookies-file FILE` | Path to Netscape cookies file for authentication               |
 | `--login`         | Perform interactive browser login before sniping                   |
 | `--prompt-login`  | After cart add, prompt for Tock credentials to tie cart to your account |
