@@ -86,6 +86,15 @@ def _collect_inline_values(args: argparse.Namespace, singular_name: str, plural_
     return values
 
 
+def _should_use_inline_task(args: argparse.Namespace) -> bool:
+    has_inline_dates = bool(getattr(args, "target", None) or args.date or getattr(args, "dates", None))
+    has_inline_exact_times = bool(args.exact_time or getattr(args, "exact_times", None))
+    is_launch_without_date_preference = bool(
+        getattr(args, "release_at", None) and getattr(args, "newly_released_only", False)
+    )
+    return has_inline_dates or has_inline_exact_times or is_launch_without_date_preference
+
+
 def _build_inline_task(args: argparse.Namespace) -> Task:
     target_args = getattr(args, "target", None)
     if target_args:
@@ -136,13 +145,16 @@ async def _cmd_recon(args: argparse.Namespace) -> None:
 async def _cmd_snipe(args: argparse.Namespace) -> None:
     if args.config:
         tasks = load_config(args.config)
-    elif args.target or args.date or getattr(args, "dates", None):
+    elif _should_use_inline_task(args):
         if not args.slug:
             log.error("Inline targeting requires a restaurant slug as positional argument")
             sys.exit(2)
         tasks = [_build_inline_task(args)]
     else:
-        log.error("Provide --config FILE, --target ..., or at least one --date/--dates")
+        log.error(
+            "Provide --config FILE, --target ..., at least one --date/--dates, "
+            "or launch mode with --release-at and --newly-released-only"
+        )
         sys.exit(2)
 
     if not tasks:
@@ -165,7 +177,7 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
 
 
 async def _cmd_run(args: argparse.Namespace) -> None:
-    if args.date or args.exact_time or getattr(args, "dates", None) or getattr(args, "exact_times", None):
+    if _should_use_inline_task(args):
         tasks = [_build_inline_task(args)]
     else:
         tasks = await recon(args.slug, size=args.size)
