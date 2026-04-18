@@ -9,12 +9,13 @@ import asyncio
 import time
 import warnings
 import sys, os
+from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from models import Selector, Task, Target
+from models import LaunchConfig, Selector, Task, Target
 from sniper import DayWorker
 
 
@@ -539,6 +540,82 @@ def test_newly_released_dates_applies_delta_and_filter():
     assert result == ["2026-06-17"]
 
 
+class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 4, 18)
+
+
+def test_default_launch_window_dates_uses_next_30_calendar_days(monkeypatch):
+    from sniper import _default_launch_window_dates
+
+    monkeypatch.setattr("sniper.datetime", FixedDateTime)
+
+    assert _default_launch_window_dates(3) == [
+        "2026-04-18",
+        "2026-04-19",
+        "2026-04-20",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_launch_mode_does_not_exit_after_first_empty_new_release_diff():
+    from sniper import _monitor_newly_released_dates
+
+    task = Task(url="taneda", size="1", selectors=[
+        Selector(dates=["2026-05-21"]),
+    ])
+    page = AsyncMock()
+
+    with patch(
+        "sniper._capture_available_dates",
+        AsyncMock(side_effect=[
+            {"2026-05-01"},
+            {"2026-05-01", "2026-05-21"},
+        ]),
+    ) as capture_mock:
+        with patch("sniper.asyncio.sleep", AsyncMock()) as sleep_mock:
+            result = await _monitor_newly_released_dates(
+                page,
+                task,
+                requested_dates=["2026-05-21"],
+                interval=5.0,
+                deadline=asyncio.get_running_loop().time() + 60,
+                baseline_dates={"2026-05-01"},
+            )
+
+    assert result == ["2026-05-21"]
+    assert capture_mock.await_count == 2
+    sleep_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_newly_released_dates_returns_empty_after_deadline():
+    from sniper import _monitor_newly_released_dates
+
+    task = Task(url="taneda", size="1", selectors=[
+        Selector(dates=["2026-05-21"]),
+    ])
+    page = AsyncMock()
+
+    with patch(
+        "sniper._capture_available_dates",
+        AsyncMock(return_value={"2026-05-01"}),
+    ):
+        with patch("sniper.asyncio.sleep", AsyncMock()) as sleep_mock:
+            result = await _monitor_newly_released_dates(
+                page,
+                task,
+                requested_dates=["2026-05-21"],
+                interval=5.0,
+                deadline=asyncio.get_running_loop().time(),
+                baseline_dates={"2026-05-01"},
+            )
+
+    assert result == []
+    sleep_mock.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_open_browser_context_uses_cdp_when_url_provided():
     from sniper import _open_browser_context
@@ -679,6 +756,222 @@ async def test_snipe_task_does_not_close_attached_cdp_browser():
     browser.close.assert_not_awaited()
     context.close.assert_not_awaited()
     page.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_snipe_task_cleans_up_stragglers_after_found_event_before_browser_close():
+    from sniper import snipe_task
+
+    order = []
+    browser = AsyncMock()
+    context = AsyncMock()
+    winner_page = AsyncMock()
+    straggler_page = AsyncMock()
+    context.new_page = AsyncMock(side_effect=[winner_page, straggler_page])
+
+    async def _close_browser():
+        order.append("browser.close")
+
+    browser.close = AsyncMock(side_effect=_close_browser)
+
+    class FakeWorker:
+        instances = []
+
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.found_event = found_event
+            self.checkout_url = None
+            self.matched_time = None
+            FakeWorker.instances.append(self)
+
+        async def run(self):
+            if self.page is winner_page:
+                self.checkout_url = "(dry-run)"
+                self.found_event.set()
+                order.append("winner.done")
+                return None
+
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                order.append("straggler.cancelled")
+                raise
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, True, True))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper.DayWorker", FakeWorker):
+                    task = Task(url="alinea", size="2", selectors=[
+                        Selector(
+                            dates=["2026-03-15", "2026-03-16"],
+                            earliest_time="5:00 PM",
+                            latest_time="9:30 PM",
+                        ),
+                    ])
+
+                    result = await snipe_task(task, dry_run=True)
+
+    assert result == {
+        "restaurant": "alinea",
+        "date": "2026-03-15",
+        "time": "",
+        "checkout_url": "(dry-run)",
+    }
+    assert order == ["winner.done", "straggler.cancelled", "browser.close"]
+
+
+@pytest.mark.asyncio
+async def test_snipe_task_monitoring_deadline_cancels_workers_before_browser_close():
+    from sniper import snipe_task
+
+    order = []
+    browser = AsyncMock()
+    context = AsyncMock()
+    page = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    async def _close_browser():
+        order.append("browser.close")
+
+    browser.close = AsyncMock(side_effect=_close_browser)
+
+    class FakeWorker:
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.checkout_url = None
+
+        async def run(self):
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                order.append("worker.cancelled")
+                raise
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, True, True))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper.DayWorker", FakeWorker):
+                    task = Task(url="alinea", size="2", selectors=[
+                        Selector(
+                            dates=["2026-03-15"],
+                            earliest_time="5:00 PM",
+                            latest_time="9:30 PM",
+                        ),
+                    ])
+
+                    result = await snipe_task(
+                        task,
+                        dry_run=True,
+                        monitor=True,
+                        monitor_duration=0.001,
+                    )
+
+    assert result is None
+    assert order == ["worker.cancelled", "browser.close"]
+
+
+@pytest.mark.asyncio
+async def test_snipe_task_launch_monitoring_retries_until_new_dates_found():
+    from sniper import snipe_task
+
+    browser = AsyncMock()
+    context = AsyncMock()
+    scout = AsyncMock()
+    worker_page = AsyncMock()
+    context.new_page = AsyncMock(side_effect=[scout, worker_page])
+
+    class FakeWorker:
+        created_targets = []
+
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.checkout_url = "(dry-run)"
+            self.matched_time = target.exact_time or target.earliest_time
+            FakeWorker.created_targets.append(target.date)
+
+        async def run(self):
+            return None
+
+    task = Task(
+        url="taneda",
+        size="1",
+        selectors=[Selector(dates=["2026-05-21"], exact_times=["5:15 PM"])],
+        launch=LaunchConfig(release_at="11:00", newly_released_only=True),
+    )
+    FakeWorker.created_targets = []
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, True, True))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper._wait_for_release", AsyncMock()):
+                    with patch("sniper.DayWorker", FakeWorker):
+                        with patch(
+                            "sniper._capture_available_dates",
+                            AsyncMock(side_effect=[
+                                {"2026-05-01"},
+                                {"2026-05-01"},
+                                {"2026-05-01", "2026-05-21"},
+                            ]),
+                        ):
+                            with patch("sniper.asyncio.sleep", AsyncMock()):
+                                result = await snipe_task(task, dry_run=True, interval=5.0)
+
+    assert result == {
+        "restaurant": "taneda",
+        "date": "2026-05-21",
+        "time": "5:15 PM",
+        "checkout_url": "(dry-run)",
+    }
+    assert FakeWorker.created_targets == ["2026-05-21"]
+
+
+@pytest.mark.asyncio
+async def test_snipe_all_forwards_monitoring_kwargs():
+    from sniper import snipe_all
+
+    task = Task(url="alinea", size="2", selectors=[
+        Selector(
+            dates=["2026-03-15"],
+            earliest_time="5:00 PM",
+            latest_time="9:30 PM",
+        ),
+    ])
+
+    with patch(
+        "sniper.snipe_task",
+        AsyncMock(return_value={
+            "restaurant": "alinea",
+            "date": "2026-03-15",
+            "time": "7:00 PM",
+            "checkout_url": "(dry-run)",
+        }),
+    ) as snipe_task_mock:
+        results = await snipe_all(
+            [task],
+            dry_run=True,
+            monitor=True,
+            monitor_duration=3.5,
+        )
+
+    snipe_task_mock.assert_awaited_once_with(
+        task,
+        dry_run=True,
+        monitor=True,
+        monitor_duration=3.5,
+    )
+    assert results == [{
+        "status": "success",
+        "restaurant": "alinea",
+        "date": "2026-03-15",
+        "time": "7:00 PM",
+        "checkout_url": "(dry-run)",
+    }]
 
 
 # ── _poll() with __NEXT_DATA__ pre-filter tests ─────────────────────────────

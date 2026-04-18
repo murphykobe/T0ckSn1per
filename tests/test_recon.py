@@ -4,9 +4,11 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 import pytest
 
-from recon import _parse_time, _time_str, _build_tasks
+import recon as recon_module
+from recon import _parse_time, _time_str, _build_tasks, _month_starts_for_lookahead
 from models import Task, Target, RESERVATION_TIME_FORMAT
 
 
@@ -133,6 +135,196 @@ class TestBuildTasks:
         }
         tasks = _build_tasks("alinea", "2", avail)
         assert tasks[0].targets[0].date == "2026-05-20"
+
+
+def test_month_starts_for_lookahead_spans_future_months():
+    starts = _month_starts_for_lookahead("2026-04-18", lookahead_days=60)
+    assert starts == ["2026-04-01", "2026-05-01", "2026-06-01"]
+
+
+class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 4, 18)
+
+
+class FakeTimeElement:
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self):
+        return self.text
+
+
+class FakeCard:
+    def __init__(self, time_text):
+        self.time_text = time_text
+
+    async def query_selector(self, selector):
+        if selector == "[data-testid='search-result-time']":
+            return FakeTimeElement(self.time_text)
+        return None
+
+
+class FakeDayButton:
+    def __init__(self, page, label):
+        self.page = page
+        self.label = label
+
+    async def get_attribute(self, name):
+        if name == "aria-label":
+            return self.label
+        return None
+
+    async def click(self):
+        self.page.selected_date = self.label
+
+
+class FakePage:
+    def __init__(self, month_data):
+        self.month_data = month_data
+        self.current_month = None
+        self.selected_date = None
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.current_month = parse_qs(urlparse(url).query)["date"][0]
+        self.selected_date = None
+
+    async def evaluate(self, script):
+        return None
+
+    async def wait_for_selector(self, selector, timeout=None):
+        return None
+
+    async def wait_for_timeout(self, timeout_ms):
+        return None
+
+    async def query_selector_all(self, selector):
+        current_dates = self.month_data[self.current_month]
+        if selector == "button[data-testid='consumer-calendar-day'][aria-disabled='false']":
+            return [FakeDayButton(self, label) for label in current_dates]
+        if selector == "[data-testid='search-result']":
+            return [FakeCard(slot) for slot in current_dates.get(self.selected_date, [])]
+        return []
+
+
+class FakeBrowser:
+    async def new_context(self, user_agent=None):
+        return object()
+
+    async def close(self):
+        return None
+
+
+class FakeChromium:
+    def __init__(self, browser):
+        self.browser = browser
+
+    async def launch(self, **kwargs):
+        return self.browser
+
+
+class FakePlaywright:
+    def __init__(self, browser):
+        self.chromium = FakeChromium(browser)
+
+
+class FakeAsyncPlaywright:
+    def __init__(self, browser):
+        self.browser = browser
+
+    async def __aenter__(self):
+        return FakePlaywright(self.browser)
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_scrape_restaurant_merges_months_and_filters_to_horizon(monkeypatch):
+    month_data = {
+        "2026-04-01": {
+            "2026-04-17": ["4:30 PM"],
+            "2026-04-18": ["5:15 PM"],
+            "2026-04-30": ["7:45 PM"],
+        },
+        "2026-05-01": {
+            "2026-05-01": ["5:15 PM"],
+            "2026-05-31": ["7:45 PM"],
+        },
+        "2026-06-01": {
+            "2026-06-16": ["5:15 PM"],
+            "2026-06-17": ["7:45 PM"],
+            "2026-06-18": ["9:30 PM"],
+        },
+    }
+    page = FakePage(month_data)
+
+    monkeypatch.setattr(recon_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(recon_module, "async_playwright", lambda: FakeAsyncPlaywright(FakeBrowser()))
+
+    async def fake_new_page(context):
+        return page
+
+    monkeypatch.setattr(recon_module, "_new_stealth_page", fake_new_page)
+
+    availability = await recon_module._scrape_restaurant("taneda", "1", lookahead_days=60)
+
+    assert list(availability) == [
+        "2026-04-18",
+        "2026-04-30",
+        "2026-05-01",
+        "2026-05-31",
+        "2026-06-16",
+        "2026-06-17",
+    ]
+    assert "2026-04-17" not in availability
+    assert "2026-06-18" not in availability
+    assert availability["2026-05-31"]["time_slots"] == ["7:45 PM"]
+
+
+@pytest.mark.asyncio
+async def test_scrape_restaurant_merges_duplicate_dates_across_month_pages(monkeypatch):
+    month_data = {
+        "2026-04-01": {
+            "2026-05-01": ["5:15 PM", "7:45 PM"],
+        },
+        "2026-05-01": {
+            "2026-05-01": ["7:45 PM"],
+        },
+    }
+    page = FakePage(month_data)
+
+    monkeypatch.setattr(recon_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(recon_module, "async_playwright", lambda: FakeAsyncPlaywright(FakeBrowser()))
+
+    async def fake_new_page(context):
+        return page
+
+    monkeypatch.setattr(recon_module, "_new_stealth_page", fake_new_page)
+
+    availability = await recon_module._scrape_restaurant("taneda", "1", lookahead_days=30)
+
+    assert availability["2026-05-01"]["time_slots"] == ["5:15 PM", "7:45 PM"]
+
+
+@pytest.mark.asyncio
+async def test_recon_threads_lookahead_days_into_scrape(monkeypatch):
+    calls = {}
+
+    async def fake_scrape(slug, size, lookahead_days=60):
+        calls["args"] = (slug, size, lookahead_days)
+        return {
+            "2026-04-19": {"time_slots": ["5:15 PM", "7:45 PM"]},
+        }
+
+    monkeypatch.setattr(recon_module, "_scrape_restaurant", fake_scrape)
+    monkeypatch.setattr(recon_module, "_enhance_with_claude", lambda slug, size, raw: None)
+
+    tasks = await recon_module.recon("taneda", size="1", lookahead_days=45)
+
+    assert calls["args"] == ("taneda", "1", 45)
+    assert [target.date for target in tasks[0].targets] == ["2026-04-19"]
 
 
 # ── _parse_next_data_json tests ──────────────────────────────────────────────

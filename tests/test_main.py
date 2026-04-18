@@ -1,10 +1,13 @@
 """Unit tests for main.py helpers."""
 
 import argparse
+import logging
+import pytest
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from main import _build_inline_task, _build_parser
+import main as main_module
+from main import _build_inline_task, _build_parser, _should_use_inline_task
 
 
 def test_build_inline_task_uses_date_and_exact_time_flags():
@@ -112,3 +115,222 @@ def test_parser_accepts_cdp_url_for_run():
     ])
 
     assert args.cdp_url == "http://127.0.0.1:9222"
+
+
+def test_parser_accepts_monitoring_flags_and_date_ranges():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--size", "1",
+        "--monitor",
+        "--monitor-duration", "20",
+        "--date-ranges", "2026-05-07:2026-05-09",
+    ])
+
+    assert args.monitor is True
+    assert args.monitor_duration == 20
+    assert args.date_ranges == "2026-05-07:2026-05-09"
+
+
+def test_build_inline_task_expands_date_ranges():
+    args = argparse.Namespace(
+        slug="taneda",
+        size="1",
+        target=None,
+        date=[],
+        dates=None,
+        date_ranges="2026-05-07:2026-05-09",
+        exact_time=[],
+        exact_times=None,
+        release_at=None,
+        newly_released_only=False,
+        monitor=True,
+        monitor_duration=15,
+    )
+
+    task = _build_inline_task(args)
+
+    assert [selector.to_dict() for selector in task.selectors] == [
+        {"dates": ["2026-05-07", "2026-05-08", "2026-05-09"]}
+    ]
+
+
+def test_monitoring_mode_without_dates_still_uses_recon_path():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "snipe",
+        "taneda",
+        "--monitor",
+    ])
+
+    assert _should_use_inline_task(args) is False
+
+
+def test_date_ranges_alone_use_inline_task_mode():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--date-ranges", "2026-05-07:2026-05-09",
+    ])
+
+    assert _should_use_inline_task(args) is True
+
+
+@pytest.mark.asyncio
+async def test_cmd_run_forwards_monitoring_kwargs_and_lookahead(monkeypatch):
+    parser = _build_parser()
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--size", "1",
+        "--monitor",
+        "--monitor-duration", "20",
+    ])
+    captured = {}
+
+    async def fake_recon(slug, size, lookahead_days):
+        captured["recon"] = (slug, size, lookahead_days)
+        return [main_module.Task(url=slug, size=size, selectors=[main_module.Selector(dates=["2026-05-21"])])]
+
+    async def fake_snipe_all(tasks, **kwargs):
+        captured["tasks"] = tasks
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(main_module, "recon", fake_recon)
+    monkeypatch.setattr(main_module, "snipe_all", fake_snipe_all)
+    monkeypatch.setattr(main_module, "_print_results", lambda results, json_mode: None)
+
+    await main_module._cmd_run(args)
+
+    assert captured["recon"] == ("taneda", "1", main_module.DEFAULT_RECON_LOOKAHEAD_DAYS)
+    assert captured["kwargs"]["monitor"] is True
+    assert captured["kwargs"]["monitor_duration"] == 20
+
+
+@pytest.mark.asyncio
+async def test_cmd_snipe_forwards_monitoring_kwargs_for_inline_targets(monkeypatch):
+    parser = _build_parser()
+    args = parser.parse_args([
+        "snipe",
+        "taneda",
+        "--date", "2026-05-21",
+        "--monitor",
+        "--monitor-duration", "10",
+    ])
+    captured = {}
+
+    async def fake_snipe_all(tasks, **kwargs):
+        captured["tasks"] = tasks
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(main_module, "snipe_all", fake_snipe_all)
+    monkeypatch.setattr(main_module, "_print_results", lambda results, json_mode: None)
+
+    await main_module._cmd_snipe(args)
+
+    assert [selector.to_dict() for selector in captured["tasks"][0].selectors] == [
+        {"dates": ["2026-05-21"]}
+    ]
+    assert captured["kwargs"]["monitor"] is True
+    assert captured["kwargs"]["monitor_duration"] == 10
+
+
+@pytest.mark.asyncio
+async def test_cmd_recon_uses_default_lookahead_days(monkeypatch, capsys):
+    parser = _build_parser()
+    args = parser.parse_args([
+        "recon",
+        "taneda",
+        "--size", "1",
+    ])
+    captured = {}
+
+    async def fake_recon(slug, size, lookahead_days):
+        captured["args"] = (slug, size, lookahead_days)
+        return [main_module.Task(url=slug, size=size, selectors=[main_module.Selector(dates=["2026-05-21"])])]
+
+    monkeypatch.setattr(main_module, "recon", fake_recon)
+
+    await main_module._cmd_recon(args)
+
+    assert captured["args"] == ("taneda", "1", main_module.DEFAULT_RECON_LOOKAHEAD_DAYS)
+    assert "2026-05-21" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_invalid_date_ranges_fail_as_cli_error(monkeypatch, caplog):
+    parser = _build_parser()
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--date-ranges", "not-a-range",
+    ])
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("snipe_all should not be called for invalid --date-ranges")
+
+    monkeypatch.setattr(main_module, "snipe_all", fail_if_called)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(SystemExit) as excinfo:
+            await main_module._cmd_run(args)
+
+    assert excinfo.value.code == 2
+    assert "Invalid --date-ranges value" in caplog.text
+
+
+def test_build_inline_task_supports_launch_mode_without_date_preferences():
+    args = argparse.Namespace(
+        slug="taneda",
+        size="1",
+        target=None,
+        date=[],
+        exact_time=[],
+        dates=None,
+        exact_times=None,
+        release_at="11:00",
+        newly_released_only=True,
+    )
+
+    task = _build_inline_task(args)
+
+    assert task.size == "1"
+    assert task.launch is not None
+    assert task.launch.newly_released_only is True
+    assert [selector.to_dict() for selector in task.selectors] == [
+        {"dates": []}
+    ]
+
+
+def test_run_uses_inline_launch_task_when_no_dates_are_provided():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--size", "1",
+        "--release-at", "11:00",
+        "--newly-released-only",
+    ])
+
+    assert _should_use_inline_task(args) is True
+
+
+def test_snipe_uses_inline_launch_task_when_no_dates_are_provided():
+    parser = _build_parser()
+
+    args = parser.parse_args([
+        "snipe",
+        "taneda",
+        "--release-at", "11:00",
+        "--newly-released-only",
+    ])
+
+    assert _should_use_inline_task(args) is True
