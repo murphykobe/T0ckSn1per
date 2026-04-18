@@ -4,7 +4,9 @@ import json
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from models import Target, Task, RESERVATION_TIME_FORMAT
+import pytest
+
+from models import RESERVATION_TIME_FORMAT, Target, Task, expand_date_ranges
 from datetime import datetime
 
 
@@ -13,6 +15,30 @@ def test_target_date_parse():
     assert t.date == "2026-03-15"
     assert t.earliest_dt() == datetime.strptime("5:00 PM", RESERVATION_TIME_FORMAT)
     assert t.latest_dt()   == datetime.strptime("9:30 PM", RESERVATION_TIME_FORMAT)
+
+
+def test_expand_date_ranges_supports_multiple_ranges():
+    dates = expand_date_ranges("2026-05-07:2026-05-09,2026-05-21:2026-05-25")
+    assert dates == [
+        "2026-05-07",
+        "2026-05-08",
+        "2026-05-09",
+        "2026-05-21",
+        "2026-05-22",
+        "2026-05-23",
+        "2026-05-24",
+        "2026-05-25",
+    ]
+
+
+def test_expand_date_ranges_returns_empty_for_blank_input():
+    assert expand_date_ranges(None) == []
+    assert expand_date_ranges("") == []
+
+
+def test_expand_date_ranges_rejects_reversed_ranges():
+    with pytest.raises(ValueError, match="2026-05-09:2026-05-07"):
+        expand_date_ranges("2026-05-09:2026-05-07")
 
 
 def test_target_search_url():
