@@ -28,6 +28,8 @@ from sniper import snipe_all
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
+DEFAULT_RECON_LOOKAHEAD_DAYS = 60
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)-12s] %(levelname)s: %(message)s",
@@ -149,7 +151,7 @@ def _build_inline_task_or_exit(args: argparse.Namespace) -> Task:
 # ── Subcommand handlers ───────────────────────────────────────────────────────
 
 async def _cmd_recon(args: argparse.Namespace) -> None:
-    tasks = await recon(args.slug, size=args.size)
+    tasks = await recon(args.slug, size=args.size, lookahead_days=DEFAULT_RECON_LOOKAHEAD_DAYS)
     if not tasks:
         log.warning("No availability found for '%s'.", args.slug)
         sys.exit(1)
@@ -160,15 +162,7 @@ async def _cmd_recon(args: argparse.Namespace) -> None:
         print(json.dumps([t.to_dict() for t in tasks], indent=2))
 
 
-def _exit_if_monitoring_not_supported(args: argparse.Namespace) -> None:
-    if getattr(args, "monitor", False):
-        log.error("--monitor is not supported yet; this will be enabled when runtime monitoring lands.")
-        sys.exit(2)
-
-
 async def _cmd_snipe(args: argparse.Namespace) -> None:
-    _exit_if_monitoring_not_supported(args)
-
     if args.config:
         tasks = load_config(args.config)
     elif _should_use_inline_task(args):
@@ -192,6 +186,8 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
         interval=args.interval,
         max_duration=args.max_duration,
         release_at=getattr(args, "release_at", None),
+        monitor=getattr(args, "monitor", False),
+        monitor_duration=getattr(args, "monitor_duration", 15.0),
         cdp_url=getattr(args, "cdp_url", None),
         timezone=getattr(args, "timezone", None),
         cookies_file=getattr(args, "cookies_file", None),
@@ -203,12 +199,10 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
 
 
 async def _cmd_run(args: argparse.Namespace) -> None:
-    _exit_if_monitoring_not_supported(args)
-
     if _should_use_inline_task(args):
         tasks = [_build_inline_task_or_exit(args)]
     else:
-        tasks = await recon(args.slug, size=args.size)
+        tasks = await recon(args.slug, size=args.size, lookahead_days=DEFAULT_RECON_LOOKAHEAD_DAYS)
         if not tasks:
             log.warning("Recon found no availability for '%s'. Nothing to snipe.", args.slug)
             sys.exit(1)
@@ -219,6 +213,8 @@ async def _cmd_run(args: argparse.Namespace) -> None:
         interval=args.interval,
         max_duration=args.max_duration,
         release_at=getattr(args, "release_at", None),
+        monitor=getattr(args, "monitor", False),
+        monitor_duration=getattr(args, "monitor_duration", 15.0),
         cdp_url=getattr(args, "cdp_url", None),
         timezone=getattr(args, "timezone", None),
         cookies_file=getattr(args, "cookies_file", None),

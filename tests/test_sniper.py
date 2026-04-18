@@ -9,6 +9,7 @@ import asyncio
 import time
 import warnings
 import sys, os
+from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
@@ -537,6 +538,24 @@ def test_newly_released_dates_applies_delta_and_filter():
     )
 
     assert result == ["2026-06-17"]
+
+
+class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 4, 18)
+
+
+def test_default_launch_window_dates_uses_next_30_calendar_days(monkeypatch):
+    from sniper import _default_launch_window_dates
+
+    monkeypatch.setattr("sniper.datetime", FixedDateTime)
+
+    assert _default_launch_window_dates(3) == [
+        "2026-04-18",
+        "2026-04-19",
+        "2026-04-20",
+    ]
 
 
 @pytest.mark.asyncio

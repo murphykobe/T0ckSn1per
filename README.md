@@ -44,7 +44,7 @@ There are three subcommands. The Tock restaurant **slug** is the path segment fr
 
 ### `recon` — discover available dates
 
-Scrapes the restaurant's Tock calendar and prints (or saves) a JSON task config.
+Scrapes the restaurant's Tock calendar and prints (or saves) a JSON task config. `recon` looks ahead 60 calendar days by default instead of only checking the current month.
 
 ```bash
 # Print discovered availability (either form works)
@@ -76,7 +76,7 @@ If `ANTHROPIC_API_KEY` is set, Claude will refine the time window. Otherwise a b
 
 ### `snipe` — snipe from a saved config or inline targets
 
-Loads a JSON config from `recon`, or accepts inline `--target` flags, compact `--dates` lists, and optional deterministic `--exact-times` values.
+Loads a JSON config from `recon`, or accepts inline `--target` flags, compact `--dates` / `--date-ranges` filters, optional deterministic `--exact-times` values, and explicit monitoring mode.
 
 ```bash
 # Live snipe from a config file
@@ -91,6 +91,18 @@ python main.py snipe canlis \
 python main.py snipe taneda \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM"
+
+# Compact ranges: expand date windows without listing every day
+python main.py snipe taneda \
+  --date-ranges "2026-05-07:2026-05-09,2026-05-21:2026-05-25" \
+  --exact-times "5:15 PM,7:45 PM"
+
+# Monitoring mode: keep polling a known target window for restocks/cancellations
+python main.py snipe taneda \
+  --dates 2026-05-21,2026-05-22 \
+  --monitor \
+  --monitor-duration 15 \
+  --interval 5
 
 # Dry-run: finds slots but does not click them
 python main.py snipe --config canlis.json --dry-run
@@ -128,6 +140,20 @@ python main.py run taneda \
   --release-at 11:00 \
   --newly-released-only
 
+# No date preference but deterministic seatings: target the next 30 calendar days by default
+python main.py run taneda \
+  --size 1 \
+  --release-at 11:00 \
+  --newly-released-only \
+  --exact-times "5:15 PM,7:45 PM"
+
+# Regular monitoring: recon the next 60 days, then keep polling what is eligible now
+python main.py run taneda \
+  --size 1 \
+  --monitor \
+  --monitor-duration 15 \
+  --interval 5
+
 # Attach to an existing local Chrome via CDP instead of launching a managed browser
 python main.py run taneda \
   --size 2 \
@@ -142,6 +168,11 @@ python main.py run canlis --size 2 --dry-run --interval 15
 ```
 
 `--release-at` uses local machine time by default. `--timezone` remains available as an advanced override, but most local runs do not need it.
+
+Default windows:
+- launch mode without explicit dates targets the next 30 calendar days
+- regular `recon` and `run` look ahead 60 calendar days
+- `--monitor-duration` defaults to 15 minutes
 
 The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--newly-released-only`, `--dates`, `--exact-times`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
 
@@ -249,12 +280,15 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 |-------------------|--------------------------------------------------------------------|
 | `--target DATE EARLIEST LATEST SIZE` | Inline target (repeatable). Example: `--target 2026-03-14 "5:00 PM" "9:30 PM" 2` |
 | `--dates YYYY-MM-DD,YYYY-MM-DD` | Comma-separated compact date filter |
+| `--date-ranges YYYY-MM-DD:YYYY-MM-DD,...` | Comma-separated inclusive date ranges |
 | `--exact-times "H:MM AM/PM,H:MM AM/PM"` | Comma-separated deterministic exact start times |
 | `--date YYYY-MM-DD` | Legacy repeatable date flag, still supported |
 | `--exact-time "H:MM AM/PM"` | Legacy repeatable exact-time flag, still supported |
 | `--config FILE`   | JSON config file from `recon`                                      |
 | `--interval SECONDS` | Poll interval in seconds (default: 30)                          |
 | `--max-duration MINUTES` | Stop after this many minutes (0 = unlimited)                |
+| `--monitor`       | Keep polling for cancellations/restocks instead of exiting after one pass |
+| `--monitor-duration MINUTES` | Monitoring window in minutes (default: 15)            |
 | `--release-at HH:MM` | Start sniping at this local machine time                       |
 | `--cdp-url URL`   | Advanced: connect to an existing Chrome/Chromium CDP endpoint     |
 | `--newly-released-only` | In launch mode, target only dates that appear after release |
@@ -279,9 +313,10 @@ venv/bin/pytest tests/ --ignore=tests/integration -v
 
 | File | What it covers |
 |---|---|
-| `tests/test_models.py` | URL building, time-window parsing, JSON round-trip (5 tests) |
-| `tests/test_recon.py` | `_parse_time`, `_time_str`, `_build_tasks`, `__NEXT_DATA__` parser (19 tests) |
-| `tests/test_sniper.py` | `DayWorker._try_time`, `_extract_next_data`, `_poll` pre-filter, `_any_slot_in_window`, cart verification, cookies (41 tests) |
+| `tests/test_models.py` | URL building, time-window parsing, JSON round-trip, date-range expansion |
+| `tests/test_main.py` | CLI parsing, inline task construction, runtime kwarg wiring |
+| `tests/test_recon.py` | `_parse_time`, `_time_str`, `_build_tasks`, forward-window month scanning, `__NEXT_DATA__` parsing |
+| `tests/test_sniper.py` | `DayWorker._try_time`, `_extract_next_data`, launch monitoring, worker cleanup, `_poll` pre-filter, cart verification, cookies |
 
 All Playwright interactions are replaced with `AsyncMock` — the suite runs in ~2 s.
 

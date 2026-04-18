@@ -157,7 +157,7 @@ def test_build_inline_task_expands_date_ranges():
     ]
 
 
-def test_monitoring_mode_does_not_use_inline_task_without_runtime_support():
+def test_monitoring_mode_without_dates_still_uses_recon_path():
     parser = _build_parser()
 
     args = parser.parse_args([
@@ -182,29 +182,86 @@ def test_date_ranges_alone_use_inline_task_mode():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("command", "argv"),
-    [
-        ("run", ["run", "taneda", "--monitor"]),
-        ("snipe", ["snipe", "taneda", "--monitor"]),
-    ],
-)
-async def test_monitor_mode_fails_fast_until_runtime_support(command, argv, monkeypatch, caplog):
+async def test_cmd_run_forwards_monitoring_kwargs_and_lookahead(monkeypatch):
     parser = _build_parser()
-    args = parser.parse_args(argv)
-    cmd = getattr(main_module, f"_cmd_{command}")
+    args = parser.parse_args([
+        "run",
+        "taneda",
+        "--size", "1",
+        "--monitor",
+        "--monitor-duration", "20",
+    ])
+    captured = {}
 
-    async def fail_if_called(*_args, **_kwargs):
-        raise AssertionError("snipe_all should not be called when monitor mode is unsupported")
+    async def fake_recon(slug, size, lookahead_days):
+        captured["recon"] = (slug, size, lookahead_days)
+        return [main_module.Task(url=slug, size=size, selectors=[main_module.Selector(dates=["2026-05-21"])])]
 
-    monkeypatch.setattr(main_module, "snipe_all", fail_if_called)
+    async def fake_snipe_all(tasks, **kwargs):
+        captured["tasks"] = tasks
+        captured["kwargs"] = kwargs
+        return []
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(SystemExit) as excinfo:
-            await cmd(args)
+    monkeypatch.setattr(main_module, "recon", fake_recon)
+    monkeypatch.setattr(main_module, "snipe_all", fake_snipe_all)
+    monkeypatch.setattr(main_module, "_print_results", lambda results, json_mode: None)
 
-    assert excinfo.value.code == 2
-    assert "--monitor is not supported yet" in caplog.text
+    await main_module._cmd_run(args)
+
+    assert captured["recon"] == ("taneda", "1", main_module.DEFAULT_RECON_LOOKAHEAD_DAYS)
+    assert captured["kwargs"]["monitor"] is True
+    assert captured["kwargs"]["monitor_duration"] == 20
+
+
+@pytest.mark.asyncio
+async def test_cmd_snipe_forwards_monitoring_kwargs_for_inline_targets(monkeypatch):
+    parser = _build_parser()
+    args = parser.parse_args([
+        "snipe",
+        "taneda",
+        "--date", "2026-05-21",
+        "--monitor",
+        "--monitor-duration", "10",
+    ])
+    captured = {}
+
+    async def fake_snipe_all(tasks, **kwargs):
+        captured["tasks"] = tasks
+        captured["kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(main_module, "snipe_all", fake_snipe_all)
+    monkeypatch.setattr(main_module, "_print_results", lambda results, json_mode: None)
+
+    await main_module._cmd_snipe(args)
+
+    assert [selector.to_dict() for selector in captured["tasks"][0].selectors] == [
+        {"dates": ["2026-05-21"]}
+    ]
+    assert captured["kwargs"]["monitor"] is True
+    assert captured["kwargs"]["monitor_duration"] == 10
+
+
+@pytest.mark.asyncio
+async def test_cmd_recon_uses_default_lookahead_days(monkeypatch, capsys):
+    parser = _build_parser()
+    args = parser.parse_args([
+        "recon",
+        "taneda",
+        "--size", "1",
+    ])
+    captured = {}
+
+    async def fake_recon(slug, size, lookahead_days):
+        captured["args"] = (slug, size, lookahead_days)
+        return [main_module.Task(url=slug, size=size, selectors=[main_module.Selector(dates=["2026-05-21"])])]
+
+    monkeypatch.setattr(main_module, "recon", fake_recon)
+
+    await main_module._cmd_recon(args)
+
+    assert captured["args"] == ("taneda", "1", main_module.DEFAULT_RECON_LOOKAHEAD_DAYS)
+    assert "2026-05-21" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
