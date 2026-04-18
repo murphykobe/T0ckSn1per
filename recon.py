@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
 
-from models import Task, Target, RESERVATION_TIME_FORMAT
+from models import Selector, Task, RESERVATION_TIME_FORMAT
 from sniper import _parse_next_data_json, NEXT_DATA_JS
 
 log = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ def _build_tasks(slug: str, size: str, availability: Dict[str, dict]) -> List[Ta
     if not availability:
         return []
 
-    targets: List[Target] = []
+    selectors: List[Selector] = []
     for date_str, data in availability.items():
         slots = [_parse_time(t) for t in data.get("time_slots", []) if _parse_time(t)]
         if slots:
@@ -204,16 +204,16 @@ def _build_tasks(slug: str, size: str, availability: Dict[str, dict]) -> List[Ta
             earliest_time = "12:00 PM"
             latest_time   = "11:00 PM"
 
-        targets.append(Target(
-            date=date_str,
+        selectors.append(Selector(
+            dates=[date_str],
             earliest_time=earliest_time,
             latest_time=latest_time,
         ))
 
-    if not targets:
+    if not selectors:
         return []
 
-    return [Task(url=slug, size=size, targets=targets)]
+    return [Task(url=slug, size=size, selectors=selectors)]
 
 
 # ── Optional Claude enhancement ───────────────────────────────────────────────

@@ -7,13 +7,14 @@ these tests run instantly without launching Chrome.
 
 import asyncio
 import time
+import warnings
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from models import Task, Target
+from models import Selector, Task, Target
 from sniper import DayWorker
 
 
@@ -21,8 +22,12 @@ from sniper import DayWorker
 
 @pytest.fixture
 def task():
-    return Task(url="alinea", size="2", targets=[
-        Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:30 PM"),
+    return Task(url="alinea", size="2", selectors=[
+        Selector(
+            dates=["2026-03-15"],
+            earliest_time="5:00 PM",
+            latest_time="9:30 PM",
+        ),
     ])
 
 @pytest.fixture
@@ -70,8 +75,12 @@ def _make_page(slots: list) -> AsyncMock:
 
 def _make_worker(task=None, target=None, page=None, dry_run=False) -> DayWorker:
     if task is None:
-        task = Task(url="canlis", size="2", targets=[
-            Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:30 PM"),
+        task = Task(url="canlis", size="2", selectors=[
+            Selector(
+                dates=["2026-03-15"],
+                earliest_time="5:00 PM",
+                latest_time="9:30 PM",
+            ),
         ])
     if target is None:
         target = task.targets[0]
@@ -230,8 +239,12 @@ class TestFoundEvent:
         """If found_event is already set, run() exits without polling."""
         page = AsyncMock()
         page.goto = AsyncMock()
-        task = Task(url="canlis", size="2", targets=[
-            Target(date="2026-03-15", earliest_time="5:00 PM", latest_time="9:30 PM"),
+        task = Task(url="canlis", size="2", selectors=[
+            Selector(
+                dates=["2026-03-15"],
+                earliest_time="5:00 PM",
+                latest_time="9:30 PM",
+            ),
         ])
         target = task.targets[0]
         event = asyncio.Event()
@@ -325,6 +338,48 @@ async def test_day_worker_polls_immediately_first_iteration(task, target):
     # Worker should have called page.goto (attempted a poll) within 2 seconds
     assert page.goto.called, "Worker never attempted to poll"
     assert elapsed < 3.0, f"Worker took {elapsed:.1f}s — should poll immediately, not sleep first"
+
+
+@pytest.mark.asyncio
+async def test_exact_time_clicks_only_exact_match():
+    early = _make_slot_element("5:00 PM")
+    exact = _make_slot_element("5:15 PM")
+    later = _make_slot_element("7:45 PM")
+    page = _make_page([early, exact, later])
+    target = Target(
+        date="2026-06-17",
+        earliest_time="5:15 PM",
+        latest_time="5:15 PM",
+        exact_time="5:15 PM",
+    )
+    worker = _make_worker(target=target, page=page)
+
+    result = await worker._try_time()
+
+    assert result is True
+    early.click.assert_not_awaited()
+    exact.click.assert_awaited_once()
+    later.click.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exact_time_ignores_non_exact_slots_inside_window():
+    inside_window = _make_slot_element("6:00 PM")
+    exact = _make_slot_element("7:45 PM")
+    page = _make_page([inside_window, exact])
+    target = Target(
+        date="2026-06-17",
+        earliest_time="5:15 PM",
+        latest_time="9:30 PM",
+        exact_time="7:45 PM",
+    )
+    worker = _make_worker(target=target, page=page)
+
+    result = await worker._try_time()
+
+    assert result is True
+    inside_window.click.assert_not_awaited()
+    exact.click.assert_awaited_once()
 
 
 # ── _extract_next_data tests ─────────────────────────────────────────────────
@@ -460,6 +515,28 @@ class TestExtractNextData:
         assert result is not None
         assert "6:00 PM" in result
         assert "8:30 PM" in result
+
+
+def test_parse_next_data_json_returns_none_for_non_dict():
+    from sniper import _parse_next_data_json
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = _parse_next_data_json(AsyncMock())
+
+    assert result is None
+    assert caught == []
+
+
+def test_newly_released_dates_applies_delta_and_filter():
+    from sniper import _newly_released_dates
+
+    result = _newly_released_dates(
+        before={"2026-06-10", "2026-06-11"},
+        after={"2026-06-10", "2026-06-11", "2026-06-17", "2026-06-18"},
+        requested_dates=["2026-06-17", "2026-06-19"],
+    )
+
+    assert result == ["2026-06-17"]
 
 
 # ── _poll() with __NEXT_DATA__ pre-filter tests ─────────────────────────────

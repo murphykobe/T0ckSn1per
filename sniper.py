@@ -140,7 +140,7 @@ def _parse_next_data_json(next_data: dict) -> Optional[list]:
     Returns a list of "H:MM AM/PM" time strings, or None if no availability
     data could be extracted.
     """
-    if not next_data:
+    if not next_data or not isinstance(next_data, dict):
         return None
 
     try:
@@ -192,6 +192,26 @@ def _parse_next_data_json(next_data: dict) -> Optional[list]:
             seen.add(t)
             result.append(t)
     return result
+
+
+def _requested_dates_from_task(task: Task) -> Optional[list]:
+    requested = []
+    for selector in task.selectors:
+        requested.extend(selector.dates)
+    unique = sorted(set(requested))
+    return unique or None
+
+
+def _newly_released_dates(
+    before: set,
+    after: set,
+    requested_dates: Optional[list] = None,
+) -> list:
+    eligible = sorted(after - before)
+    if requested_dates:
+        allowed = set(requested_dates)
+        eligible = [date for date in eligible if date in allowed]
+    return eligible
 
 
 # ── Stealth helper ────────────────────────────────────────────────────────────
@@ -275,12 +295,8 @@ class DayWorker:
     def _any_slot_in_window(self, time_strings: list) -> bool:
         """Check if any time string falls within the target's earliest/latest window."""
         for t_str in time_strings:
-            try:
-                t = datetime.strptime(t_str, RESERVATION_TIME_FORMAT)
-                if self.target.earliest_dt() <= t <= self.target.latest_dt():
-                    return True
-            except ValueError:
-                continue
+            if self.target.matches_time(t_str):
+                return True
         return False
 
     async def _poll(self) -> bool:
@@ -365,46 +381,43 @@ class DayWorker:
                 if not time_el:
                     continue
                 time_text = (await time_el.inner_text()).strip()
-                try:
-                    t = datetime.strptime(time_text, RESERVATION_TIME_FORMAT)
-                except ValueError:
+                if not self.target.matches_time(time_text):
                     continue
-                if self.target.earliest_dt() <= t <= self.target.latest_dt():
-                    book_btn = await card.query_selector(
-                        "button[data-testid='booking-card-button']"
-                    )
-                    if not book_btn:
-                        continue
-                    log.info("[%s/%s] Clicking slot %s", self.task.url, self.target.date, time_text)
-                    self.matched_time = time_text
-                    if not self.dry_run:
-                        await book_btn.click()
-                        cart_confirmed = False
-                        try:
-                            await self.page.wait_for_url("**/checkout/**", timeout=8000)
+                book_btn = await card.query_selector(
+                    "button[data-testid='booking-card-button']"
+                )
+                if not book_btn:
+                    continue
+                log.info("[%s/%s] Clicking slot %s", self.task.url, self.target.date, time_text)
+                self.matched_time = time_text
+                if not self.dry_run:
+                    await book_btn.click()
+                    cart_confirmed = False
+                    try:
+                        await self.page.wait_for_url("**/checkout/**", timeout=8000)
+                        cart_confirmed = True
+                    except PWTimeout:
+                        # Fallback checks per PRD FR-8
+                        holding = await self.page.query_selector("[data-testid='holding-time']")
+                        if holding:
                             cart_confirmed = True
-                        except PWTimeout:
-                            # Fallback checks per PRD FR-8
-                            holding = await self.page.query_selector("[data-testid='holding-time']")
-                            if holding:
-                                cart_confirmed = True
-                            else:
-                                complete_el = await self.page.query_selector("text='Complete your reservation'")
-                                if complete_el:
-                                    cart_confirmed = True
-
-                        if cart_confirmed:
-                            self.checkout_url = self.page.url
-                            return True
                         else:
-                            log.warning(
-                                "[%s/%s] Clicked slot %s but cart add not confirmed — retrying next cycle",
-                                self.task.url, self.target.date, time_text,
-                            )
-                            return False
-                    else:
-                        self.checkout_url = "(dry-run)"
+                            complete_el = await self.page.query_selector("text='Complete your reservation'")
+                            if complete_el:
+                                cart_confirmed = True
+
+                    if cart_confirmed:
+                        self.checkout_url = self.page.url
                         return True
+                    else:
+                        log.warning(
+                            "[%s/%s] Clicked slot %s but cart add not confirmed — retrying next cycle",
+                            self.task.url, self.target.date, time_text,
+                        )
+                        return False
+                else:
+                    self.checkout_url = "(dry-run)"
+                    return True
         except PWTimeout:
             log.debug("[%s/%s] No search-result cards loaded", self.task.url, self.target.date)
         except Exception as e:
@@ -564,6 +577,30 @@ async def _wait_for_release(release_at: str, timezone: str = None) -> None:
     log.info("RELEASE TIME %s — firing all workers!", release_at)
 
 
+async def _capture_available_dates(page: Page, slug: str, size: str) -> set:
+    """Capture currently visible available dates from the restaurant calendar."""
+    month_n = f"{datetime.now().month:02d}"
+    year = str(datetime.now().year)
+    url = (
+        f"https://www.exploretock.com/{slug}/search"
+        f"?date={year}-{month_n}-01&size={size}&time=19%3A00"
+    )
+
+    await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+    await page.wait_for_selector("div.ConsumerCalendar-month", timeout=PAGE_LOAD_TIMEOUT)
+    await page.wait_for_timeout(2000)
+
+    buttons = await page.query_selector_all(
+        "button[data-testid='consumer-calendar-day'][aria-disabled='false']"
+    )
+    dates = set()
+    for button in buttons:
+        label = await button.get_attribute("aria-label")
+        if label and len(label) == 10:
+            dates.add(label)
+    return dates
+
+
 # ── Task orchestration ────────────────────────────────────────────────────────
 
 async def snipe_task(
@@ -582,6 +619,8 @@ async def snipe_task(
     Returns a result dict on success, or None if no reservation was secured.
     """
     found_event = asyncio.Event()
+    effective_release_at = release_at or (task.launch.release_at if task.launch else None)
+    launch_newly_released_only = bool(task.launch and task.launch.newly_released_only)
     log.info(
         "[%s] Starting snipe — %d target(s) to watch",
         task.url, len(task.targets),
@@ -599,29 +638,52 @@ async def snipe_task(
         if interactive_login:
             await _interactive_login(context, PAGE_LOAD_TIMEOUT)
 
+        resolved_task = task
+        if effective_release_at and launch_newly_released_only:
+            scout = await context.new_page()
+            await _apply_stealth(scout)
+            try:
+                before_dates = await _capture_available_dates(scout, task.url, task.size)
+                await _wait_for_release(effective_release_at, timezone=timezone)
+                after_dates = await _capture_available_dates(scout, task.url, task.size)
+            finally:
+                await scout.close()
+
+            eligible_dates = _newly_released_dates(
+                before=before_dates,
+                after=after_dates,
+                requested_dates=_requested_dates_from_task(task),
+            )
+            if not eligible_dates:
+                log.info("[%s] No newly released eligible dates found.", task.url)
+                await browser.close()
+                return None
+            resolved_task = task.filter_dates(eligible_dates)
+
         # Open one tab per target
         workers: List[DayWorker] = []
-        for i, target in enumerate(task.targets):
+        expanded_targets = resolved_task.expand_targets()
+        for i, target in enumerate(expanded_targets):
             page = await context.new_page()
             await _apply_stealth(page)
-            workers.append(DayWorker(task, target, page, found_event, dry_run=dry_run, interval=interval, prompt_login=prompt_login))
-            if i < len(task.targets) - 1:
+            workers.append(DayWorker(resolved_task, target, page, found_event, dry_run=dry_run, interval=interval, prompt_login=prompt_login))
+            if i < len(expanded_targets) - 1:
                 await asyncio.sleep(LAUNCH_STAGGER_SEC)
 
         # Pre-warm all pages in release mode so they're loaded before the countdown ends
-        if release_at:
-            log.info("[%s] Pre-warming %d worker pages...", task.url, len(workers))
+        if effective_release_at and not launch_newly_released_only:
+            log.info("[%s] Pre-warming %d worker pages...", resolved_task.url, len(workers))
             for w in workers:
                 try:
                     await w.page.goto(
-                        w.target.search_url(task.url, task.size),
+                        w.target.search_url(resolved_task.url, resolved_task.size),
                         wait_until="domcontentloaded",
                         timeout=PAGE_LOAD_TIMEOUT,
                     )
                 except Exception as e:
-                    log.warning("[%s/%s] Pre-warm failed: %s", task.url, w.target.date, e)
+                    log.warning("[%s/%s] Pre-warm failed: %s", resolved_task.url, w.target.date, e)
 
-            await _wait_for_release(release_at, timezone=timezone)
+            await _wait_for_release(effective_release_at, timezone=timezone)
 
         # Run all workers concurrently
         timed_out = False
