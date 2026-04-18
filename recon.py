@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, TimeoutError as PWTimeout
@@ -50,22 +50,59 @@ async def _new_stealth_page(context: BrowserContext) -> Page:
     return page
 
 
+def _lookahead_bounds(today_iso: Optional[str] = None, lookahead_days: int = 60) -> Tuple[date, date]:
+    today = datetime.strptime(today_iso, "%Y-%m-%d").date() if today_iso else datetime.now().date()
+    return today, today + timedelta(days=lookahead_days)
+
+
+def _month_starts_for_lookahead(today_iso: Optional[str] = None, lookahead_days: int = 60) -> List[str]:
+    today, end = _lookahead_bounds(today_iso=today_iso, lookahead_days=lookahead_days)
+    cursor = date(today.year, today.month, 1)
+    starts: List[str] = []
+    while cursor <= end:
+        starts.append(cursor.isoformat())
+        if cursor.month == 12:
+            cursor = date(cursor.year + 1, 1, 1)
+        else:
+            cursor = date(cursor.year, cursor.month + 1, 1)
+    return starts
+
+
+def _date_is_within_lookahead(date_str: str, start: date, end: date) -> bool:
+    try:
+        candidate = datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    return start <= candidate <= end
+
+
+def _merge_time_slots(existing_slots: List[str], new_slots: List[str]) -> List[str]:
+    if not existing_slots:
+        return list(new_slots)
+    if not new_slots:
+        return list(existing_slots)
+
+    merged: List[str] = []
+    for slot in [*existing_slots, *new_slots]:
+        if slot not in merged:
+            merged.append(slot)
+    return merged
+
+
 # ── Core scraping ─────────────────────────────────────────────────────────────
 
-async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
+async def _scrape_restaurant(slug: str, size: str, lookahead_days: int = 60) -> Dict[str, dict]:
     """
     Open the Tock search page for *slug* and extract available dates.
     Returns a dict keyed by ISO date string ("YYYY-MM-DD"):
         { "2026-03-15": { "time_slots": ["5:00 PM", ...] }, ... }
     """
-    month_n = f"{datetime.now().month:02d}"
-    year    = str(datetime.now().year)
-    url     = (
-        f"https://www.exploretock.com/{slug}/search"
-        f"?date={year}-{month_n}-01&size={size}&time=19%3A00"
-    )
-
     result: Dict[str, dict] = {}
+    lookahead_start, lookahead_end = _lookahead_bounds(lookahead_days=lookahead_days)
+    month_starts = _month_starts_for_lookahead(
+        today_iso=lookahead_start.isoformat(),
+        lookahead_days=lookahead_days,
+    )
 
     async with async_playwright() as p:
         _launch_kwargs: dict = {"headless": HEADLESS, "args": ["--disable-blink-features=AutomationControlled"]}
@@ -82,78 +119,88 @@ async def _scrape_restaurant(slug: str, size: str) -> Dict[str, dict]:
         page = await _new_stealth_page(context)
 
         try:
-            log.info("[recon] Loading %s", url)
-            await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
-
-            # Try __NEXT_DATA__ extraction as supplementary data source
-            nd_slots = None
-            try:
-                next_data = await page.evaluate(NEXT_DATA_JS)
-                nd_slots = _parse_next_data_json(next_data)
-                if nd_slots:
-                    log.info("[recon] __NEXT_DATA__ found %d slot(s)", len(nd_slots))
-            except Exception:
-                pass
-
-            # Wait for calendar + extra settle time for React to render day buttons
-            try:
-                await page.wait_for_selector("div.ConsumerCalendar-month", timeout=PAGE_LOAD_TIMEOUT_MS)
-                await page.wait_for_timeout(2000)
-            except PWTimeout:
-                log.error(
-                    "[recon] Calendar not found for '%s'. "
-                    "Is this a valid Tock slug? Cloudflare may be blocking.",
-                    slug,
+            for month_start in month_starts:
+                url = (
+                    f"https://www.exploretock.com/{slug}/search"
+                    f"?date={month_start}&size={size}&time=19%3A00"
                 )
-                return result
+                log.info("[recon] Loading %s", url)
+                await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT_MS)
 
-            # ── Collect all available days via aria-label ("YYYY-MM-DD") ─────
-            # Each available day button carries data-testid="consumer-calendar-day"
-            # and aria-disabled="false".
-            day_btns = await page.query_selector_all(
-                "button[data-testid='consumer-calendar-day'][aria-disabled='false']"
-            )
-            log.info("[recon] Found %d available day button(s)", len(day_btns))
-
-            # Group by date string; remember first button per date for time-slot sampling.
-            from collections import defaultdict
-            dates: Dict[str, dict] = {}   # date_str → {first_btn}
-            for btn in day_btns:
-                label = await btn.get_attribute("aria-label")  # "2026-03-05"
-                if not label or len(label) != 10:
-                    continue
-                if label not in dates:
-                    dates[label] = {"first_btn": btn}
-
-            for date_str, data in dates.items():
-                first_btn = data["first_btn"]
-                log.info("[recon] Available date: %s", date_str)
-
-                # ── Sample time slots by clicking the available day ──────────
-                time_slots: List[str] = []
+                # Try __NEXT_DATA__ extraction as supplementary data source
+                nd_slots = None
                 try:
-                    await first_btn.click()
-                    await page.wait_for_selector(
-                        "[data-testid='search-result']",
-                        timeout=8_000,
-                    )
-                    cards = await page.query_selector_all("[data-testid='search-result']")
-                    for card in cards:
-                        time_el = await card.query_selector("[data-testid='search-result-time']")
-                        if time_el:
-                            time_slots.append((await time_el.inner_text()).strip())
-                    log.info("[recon] %s: time slots found: %s", date_str, time_slots)
+                    next_data = await page.evaluate(NEXT_DATA_JS)
+                    nd_slots = _parse_next_data_json(next_data)
+                    if nd_slots:
+                        log.info("[recon] __NEXT_DATA__ found %d slot(s)", len(nd_slots))
+                except Exception:
+                    pass
+
+                # Wait for calendar + extra settle time for React to render day buttons
+                try:
+                    await page.wait_for_selector("div.ConsumerCalendar-month", timeout=PAGE_LOAD_TIMEOUT_MS)
+                    await page.wait_for_timeout(2000)
                 except PWTimeout:
-                    log.debug("[recon] No search-result cards loaded for %s", date_str)
-                except Exception as e:
-                    log.debug("[recon] Error fetching time slots: %s", e)
+                    log.error(
+                        "[recon] Calendar not found for '%s'. "
+                        "Is this a valid Tock slug? Cloudflare may be blocking.",
+                        slug,
+                    )
+                    return result
 
-                # Fall back to __NEXT_DATA__ slots if DOM scraping yielded nothing
-                if not time_slots and nd_slots:
-                    log.info("[recon] %s: using __NEXT_DATA__ slots as fallback", date_str)
-                    time_slots = list(nd_slots)
+                # ── Collect all available days via aria-label ("YYYY-MM-DD") ─────
+                # Each available day button carries data-testid="consumer-calendar-day"
+                # and aria-disabled="false".
+                day_btns = await page.query_selector_all(
+                    "button[data-testid='consumer-calendar-day'][aria-disabled='false']"
+                )
 
-                result[date_str] = {"time_slots": time_slots}
+                # Group by date string; remember first button per date for time-slot sampling.
+                dates: Dict[str, dict] = {}
+                for btn in day_btns:
+                    label = await btn.get_attribute("aria-label")  # "2026-03-05"
+                    if not label or len(label) != 10:
+                        continue
+                    if not _date_is_within_lookahead(label, lookahead_start, lookahead_end):
+                        continue
+                    if label not in dates:
+                        dates[label] = {"first_btn": btn}
+
+                log.info("[recon] Found %d available day button(s)", len(dates))
+
+                for date_str, data in sorted(dates.items()):
+                    first_btn = data["first_btn"]
+                    log.info("[recon] Available date: %s", date_str)
+
+                    # ── Sample time slots by clicking the available day ──────────
+                    time_slots: List[str] = []
+                    try:
+                        await first_btn.click()
+                        await page.wait_for_selector(
+                            "[data-testid='search-result']",
+                            timeout=8_000,
+                        )
+                        cards = await page.query_selector_all("[data-testid='search-result']")
+                        for card in cards:
+                            time_el = await card.query_selector("[data-testid='search-result-time']")
+                            if time_el:
+                                time_slots.append((await time_el.inner_text()).strip())
+                        log.info("[recon] %s: time slots found: %s", date_str, time_slots)
+                    except PWTimeout:
+                        log.debug("[recon] No search-result cards loaded for %s", date_str)
+                    except Exception as e:
+                        log.debug("[recon] Error fetching time slots: %s", e)
+
+                    # Fall back to __NEXT_DATA__ slots if DOM scraping yielded nothing
+                    if not time_slots and nd_slots:
+                        log.info("[recon] %s: using __NEXT_DATA__ slots as fallback", date_str)
+                        time_slots = list(nd_slots)
+
+                    existing_slots = result.get(date_str, {}).get("time_slots", [])
+                    result[date_str] = {
+                        "time_slots": _merge_time_slots(existing_slots, time_slots)
+                    }
 
         finally:
             await browser.close()
@@ -277,13 +324,13 @@ Rules:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def recon(slug: str, size: str = DEFAULT_PARTY_SIZE) -> List[Task]:
+async def recon(slug: str, size: str = DEFAULT_PARTY_SIZE, lookahead_days: int = 60) -> List[Task]:
     """
     Visit the Tock page for *slug* and return a list of Task configs
     representing all available dates within the acceptable time window.
     """
     log.info("[recon] Starting for %s (party of %s)", slug, size)
-    availability = await _scrape_restaurant(slug, size)
+    availability = await _scrape_restaurant(slug, size, lookahead_days=lookahead_days)
 
     if not availability:
         log.warning("[recon] No availability found for %s", slug)
