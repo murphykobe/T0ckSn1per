@@ -74,25 +74,40 @@ def _print_results(results: list, json_mode: bool) -> None:
         sys.exit(1)
 
 
+def _split_csv_values(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _collect_inline_values(args: argparse.Namespace, singular_name: str, plural_name: str) -> list[str]:
+    values = list(getattr(args, singular_name, []) or [])
+    plural_value = getattr(args, plural_name, None)
+    if plural_value:
+        values.extend(_split_csv_values(plural_value))
+    return values
+
+
 def _build_inline_task(args: argparse.Namespace) -> Task:
-    if args.target:
+    target_args = getattr(args, "target", None)
+    if target_args:
         selectors = [
             Selector(
                 dates=[date],
                 earliest_time=earliest,
                 latest_time=latest,
             )
-            for date, earliest, latest, _size in args.target
+            for date, earliest, latest, _size in target_args
         ]
-        size = args.target[0][3]
+        size = target_args[0][3]
     else:
+        dates = _collect_inline_values(args, "date", "dates")
+        exact_times = _collect_inline_values(args, "exact_time", "exact_times")
         selectors = [
             Selector(
-                dates=list(getattr(args, "date", []) or []),
-                exact_times=list(getattr(args, "exact_time", []) or []),
+                dates=dates,
+                exact_times=exact_times,
             )
         ]
-        size = args.size
+        size = getattr(args, "size", "2")
 
     launch = None
     if getattr(args, "release_at", None):
@@ -121,13 +136,13 @@ async def _cmd_recon(args: argparse.Namespace) -> None:
 async def _cmd_snipe(args: argparse.Namespace) -> None:
     if args.config:
         tasks = load_config(args.config)
-    elif args.target or args.date:
+    elif args.target or args.date or getattr(args, "dates", None):
         if not args.slug:
             log.error("Inline targeting requires a restaurant slug as positional argument")
             sys.exit(2)
         tasks = [_build_inline_task(args)]
     else:
-        log.error("Provide --config FILE, --target ..., or at least one --date")
+        log.error("Provide --config FILE, --target ..., or at least one --date/--dates")
         sys.exit(2)
 
     if not tasks:
@@ -149,7 +164,7 @@ async def _cmd_snipe(args: argparse.Namespace) -> None:
 
 
 async def _cmd_run(args: argparse.Namespace) -> None:
-    if args.date or args.exact_time:
+    if args.date or args.exact_time or getattr(args, "dates", None) or getattr(args, "exact_times", None):
         tasks = [_build_inline_task(args)]
     else:
         tasks = await recon(args.slug, size=args.size)
@@ -203,6 +218,10 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Target calendar date YYYY-MM-DD (repeatable)")
     p_snipe.add_argument("--exact-time", action="append", default=[],
                          help="Exact reservation start time, e.g. '5:15 PM' (repeatable)")
+    p_snipe.add_argument("--dates",
+                         help="Comma-separated target dates, e.g. '2026-05-27,2026-05-28'")
+    p_snipe.add_argument("--exact-times",
+                         help="Comma-separated exact times, e.g. '5:15 PM,7:45 PM'")
     p_snipe.add_argument("--dry-run", action="store_true", help="Find slots but don't click")
     p_snipe.add_argument("--interval", type=float, default=30.0, metavar="SECONDS",
                          help="Poll interval in seconds (default: 30)")
@@ -231,6 +250,10 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Target calendar date YYYY-MM-DD (repeatable)")
     p_run.add_argument("--exact-time", action="append", default=[],
                        help="Exact reservation start time, e.g. '5:15 PM' (repeatable)")
+    p_run.add_argument("--dates",
+                       help="Comma-separated target dates, e.g. '2026-05-27,2026-05-28'")
+    p_run.add_argument("--exact-times",
+                       help="Comma-separated exact times, e.g. '5:15 PM,7:45 PM'")
     p_run.add_argument("--dry-run", action="store_true", help="Find slots but don't click")
     p_run.add_argument("--save", metavar="FILE", help="Also save recon config to JSON")
     p_run.add_argument("--interval", type=float, default=30.0, metavar="SECONDS",
