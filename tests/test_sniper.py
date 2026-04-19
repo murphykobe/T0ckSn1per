@@ -119,6 +119,25 @@ async def test_day_worker_try_day_uses_target_date(task, target):
     assert "consumer-calendar-day" in call_args
 
 
+@pytest.mark.asyncio
+async def test_day_worker_try_day_waits_briefly_for_target_button(task, target):
+    page = AsyncMock()
+    button = AsyncMock()
+    page.query_selector = AsyncMock(side_effect=[None, button])
+    event = asyncio.Event()
+    worker = DayWorker(task=task, target=target, page=page, found_event=event)
+    worker._try_time = AsyncMock(return_value=True)
+
+    with patch("sniper.asyncio.sleep", AsyncMock()) as sleep_mock:
+        result = await worker._try_day()
+
+    assert result is True
+    assert page.query_selector.await_count == 2
+    button.click.assert_awaited_once()
+    worker._try_time.assert_awaited_once()
+    sleep_mock.assert_awaited_once()
+
+
 # ── _try_time tests ───────────────────────────────────────────────────────────
 
 class TestTryTime:
@@ -1052,23 +1071,42 @@ async def test_wait_for_selector_until_stop_exits_when_found_event_set():
 
     assert result is False
 
-    @pytest.mark.asyncio
-    async def test_poll_falls_back_to_dom_when_next_data_unavailable(self):
-        """__NEXT_DATA__ returns None -> falls through to DOM path, _try_day IS called."""
-        page = AsyncMock()
-        page.goto = AsyncMock()
-        # __NEXT_DATA__ element not found
-        page.evaluate = AsyncMock(return_value=None)
-        page.wait_for_selector = AsyncMock()
-        page.wait_for_timeout = AsyncMock()
 
-        worker = _make_worker(page=page)
-        worker._try_day = AsyncMock(return_value=True)
+@pytest.mark.asyncio
+async def test_poll_falls_back_to_dom_when_next_data_unavailable():
+    """__NEXT_DATA__ returns None -> falls through to DOM path, _try_day IS called."""
+    page = AsyncMock()
+    page.goto = AsyncMock()
+    # __NEXT_DATA__ element not found
+    page.evaluate = AsyncMock(return_value=None)
+    page.wait_for_selector = AsyncMock()
+    page.wait_for_timeout = AsyncMock()
 
-        result = await worker._poll()
+    worker = _make_worker(page=page)
+    worker._try_day = AsyncMock(return_value=True)
 
-        assert result is True
-        worker._try_day.assert_awaited_once()
+    result = await worker._poll()
+
+    assert result is True
+    worker._try_day.assert_awaited_once()
+    page.wait_for_timeout.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capture_available_dates_waits_for_day_buttons_not_fixed_sleep():
+    from sniper import _capture_available_dates
+
+    page = AsyncMock()
+    button = AsyncMock()
+    button.get_attribute = AsyncMock(return_value="2026-04-18")
+    page.query_selector_all = AsyncMock(return_value=[button])
+
+    dates = await _capture_available_dates(page, "taneda", "1")
+
+    assert dates == {"2026-04-18"}
+    assert page.wait_for_selector.await_args_list[0].args[0] == "div.ConsumerCalendar-month"
+    assert page.wait_for_selector.await_args_list[1].args[0] == "button[data-testid='consumer-calendar-day']"
+    page.wait_for_timeout.assert_not_awaited()
 
 
 # ── _any_slot_in_window tests ────────────────────────────────────────────────

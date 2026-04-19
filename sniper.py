@@ -444,6 +444,28 @@ class DayWorker:
                 continue
         return False
 
+    async def _wait_for_target_day_button(
+        self,
+        timeout_ms: int = 1_500,
+        step_ms: int = 100,
+    ):
+        """Wait briefly for the specific target day button to render/enabled."""
+        selector = (
+            f"button[data-testid='consumer-calendar-day']"
+            f"[aria-label='{self.target.date}'][aria-disabled='false']"
+        )
+        deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+        while not self.found_event.is_set():
+            btn = await self.page.query_selector(selector)
+            if btn:
+                return btn
+
+            remaining_ms = int((deadline - asyncio.get_running_loop().time()) * 1000)
+            if remaining_ms <= 0:
+                return None
+            await asyncio.sleep(min(step_ms, remaining_ms) / 1000)
+        return None
+
     async def run(self) -> None:
         log.info(
             "[%s/%s] Worker started | party=%s | %s–%s",
@@ -534,17 +556,12 @@ class DayWorker:
             log.warning("[%s/%s] Calendar load error: %s", self.task.url, self.target.date, e)
             return False
 
-        # Extra settle time for React to render day buttons after calendar container appears
-        await self.page.wait_for_timeout(2000)
         return await self._try_day()
 
     async def _try_day(self) -> bool:
         """Click the target day using its aria-label date attribute."""
         try:
-            btn = await self.page.query_selector(
-                f"button[data-testid='consumer-calendar-day']"
-                f"[aria-label='{self.target.date}'][aria-disabled='false']"
-            )
+            btn = await self._wait_for_target_day_button()
             if btn:
                 log.info("[%s/%s] Day available — clicking", self.task.url, self.target.date)
                 await btn.click()
@@ -784,7 +801,10 @@ async def _capture_available_dates(page: Page, slug: str, size: str) -> set:
 
     await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
     await page.wait_for_selector("div.ConsumerCalendar-month", timeout=PAGE_LOAD_TIMEOUT)
-    await page.wait_for_timeout(2000)
+    await page.wait_for_selector(
+        "button[data-testid='consumer-calendar-day']",
+        timeout=PAGE_LOAD_TIMEOUT,
+    )
 
     buttons = await page.query_selector_all(
         "button[data-testid='consumer-calendar-day'][aria-disabled='false']"
