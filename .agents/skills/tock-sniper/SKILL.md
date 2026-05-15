@@ -17,10 +17,10 @@ Prefer:
 
 ## Command Source
 
-Run the latest repo version with:
+Run with:
 
 ```bash
-uvx --from git+https://github.com/murphykobe/T0ckSn1per t0cksn1per --help
+uvx t0cksn1per --help
 ```
 
 ## What To Gather
