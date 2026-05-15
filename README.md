@@ -21,7 +21,7 @@ Concurrent Tock reservation sniper built on Playwright + asyncio. Opens one brow
 uv tool install t0cksn1per
 
 # 2. Install Playwright's Chromium browser (required — browsers are not bundled)
-playwright install chromium
+uvx --from playwright playwright install chromium
 ```
 
 This installs the `t0cksn1per` command globally. All usage examples below use this command.
