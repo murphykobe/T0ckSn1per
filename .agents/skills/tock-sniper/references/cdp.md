@@ -13,8 +13,7 @@ Use CDP only when the user explicitly wants to run against an existing Chrome on
 ## Run The CLI Through CDP
 
 ```bash
-PLAYWRIGHT_HEADLESS=0 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
-  t0cksn1per run taneda \
+PLAYWRIGHT_HEADLESS=0 uvx t0cksn1per run taneda \
   --size 3 \
   --release-at 11:00 \
   --newly-released-only \

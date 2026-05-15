@@ -3,8 +3,7 @@
 ## Local Headed Launch
 
 ```bash
-PLAYWRIGHT_HEADLESS=0 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
-  t0cksn1per run taneda \
+PLAYWRIGHT_HEADLESS=0 uvx t0cksn1per run taneda \
   --size 3 \
   --release-at 11:00 \
   --newly-released-only \
@@ -15,8 +14,7 @@ PLAYWRIGHT_HEADLESS=0 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
 ## Node Headless Launch
 
 ```bash
-PLAYWRIGHT_HEADLESS=1 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
-  t0cksn1per run taneda \
+PLAYWRIGHT_HEADLESS=1 uvx t0cksn1per run taneda \
   --size 1 \
   --release-at 11:00 \
   --newly-released-only \
@@ -26,8 +24,7 @@ PLAYWRIGHT_HEADLESS=1 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
 ## Local Headed CDP
 
 ```bash
-PLAYWRIGHT_HEADLESS=0 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
-  t0cksn1per run taneda \
+PLAYWRIGHT_HEADLESS=0 uvx t0cksn1per run taneda \
   --size 3 \
   --release-at 11:00 \
   --newly-released-only \
