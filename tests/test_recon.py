@@ -319,7 +319,6 @@ async def test_recon_threads_lookahead_days_into_scrape(monkeypatch):
         }
 
     monkeypatch.setattr(recon_module, "_scrape_restaurant", fake_scrape)
-    monkeypatch.setattr(recon_module, "_enhance_with_claude", lambda slug, size, raw: None)
 
     tasks = await recon_module.recon("taneda", size="1", lookahead_days=45)
 
