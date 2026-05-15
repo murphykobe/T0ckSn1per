@@ -6,11 +6,24 @@ build-backend = "setuptools.build_meta"
 name = "t0cksn1per"
 version = "0.2.0"
 description = "Concurrent Tock reservation sniper built on Playwright + asyncio"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.9"
+authors = [{ name = "Murphy", email = "murphykobe@gmail.com" }]
+keywords = ["tock", "reservation", "sniper", "playwright"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "playwright>=1.44.0",
     "playwright-stealth>=1.0.6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/murphykobe/T0ckSn1per"
+Source = "https://github.com/murphykobe/T0ckSn1per"
 
 [project.optional-dependencies]
 ai = ["anthropic>=0.28.0"]

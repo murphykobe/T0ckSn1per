@@ -14,27 +14,42 @@ Concurrent Tock reservation sniper built on Playwright + asyncio. Opens one brow
 
 ## Setup
 
+### Installing from PyPI
+
 ```bash
-# 1. Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+# 1. Install the package
+uv tool install t0cksn1per
 
-# 2. Install as a package (editable mode for development)
-pip install -e ".[dev,ai,notify]"
-
-# 3. Install Playwright's Chromium browser
+# 2. Install Playwright's Chromium browser (required — browsers are not bundled)
 playwright install chromium
 ```
 
-This installs a `t0cksn1per` CLI command. You can also run directly with `python main.py`.
+This installs the `t0cksn1per` command globally. All usage examples below use this command.
 
-For one-off runs without cloning or creating a venv first, you can execute the repo directly with `uvx`:
+### One-off run (no install)
 
 ```bash
 uvx --from git+https://github.com/murphykobe/T0ckSn1per t0cksn1per --help
 ```
 
-All subsequent commands assume the venv is active (or use `venv/bin/python3` / `venv/bin/pytest` directly).
+### Development setup (clone the repo)
+
+```bash
+# 1. Clone and enter the repo
+git clone https://github.com/murphykobe/T0ckSn1per && cd T0ckSn1per
+
+# 2. Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+
+# 3. Install with dev/optional extras
+pip install -e ".[dev,ai,notify]"
+
+# 4. Install Playwright's Chromium browser
+playwright install chromium
+```
+
+In development you can also run directly with `python main.py` instead of `t0cksn1per`.
 
 ---
 
@@ -47,12 +62,11 @@ There are three subcommands. The Tock restaurant **slug** is the path segment fr
 Scrapes the restaurant's Tock calendar and prints (or saves) a JSON task config. `recon` looks ahead 60 calendar days by default instead of only checking the current month.
 
 ```bash
-# Print discovered availability (either form works)
+# Print discovered availability
 t0cksn1per recon canlis --size 2
-python main.py recon canlis --size 2
 
 # Save to a file for later use with `snipe`
-python main.py recon canlis --size 2 --save canlis.json
+t0cksn1per recon canlis --size 2 --save canlis.json
 ```
 
 Sample output:
@@ -80,35 +94,35 @@ Loads a JSON config from `recon`, or accepts inline `--target` flags, compact `-
 
 ```bash
 # Live snipe from a config file
-python main.py snipe --config canlis.json
+t0cksn1per snipe --config canlis.json
 
 # Inline targets (no config file needed)
-python main.py snipe canlis \
+t0cksn1per snipe canlis \
   --target 2026-03-14 "5:00 PM" "9:30 PM" 2 \
   --target 2026-03-21 "5:00 PM" "9:30 PM" 2
 
 # Compact deterministic mode: try exact start times on a list of dates
-python main.py snipe taneda \
+t0cksn1per snipe taneda \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM"
 
 # Compact ranges: expand date windows without listing every day
-python main.py snipe taneda \
+t0cksn1per snipe taneda \
   --date-ranges "2026-05-07:2026-05-09,2026-05-21:2026-05-25" \
   --exact-times "5:15 PM,7:45 PM"
 
 # Monitoring mode: keep polling a known target window for restocks/cancellations
-python main.py snipe taneda \
+t0cksn1per snipe taneda \
   --dates 2026-05-21,2026-05-22 \
   --monitor \
   --monitor-duration 15 \
   --interval 5
 
 # Dry-run: finds slots but does not click them
-python main.py snipe --config canlis.json --dry-run
+t0cksn1per snipe --config canlis.json --dry-run
 
 # Output structured JSON on stdout
-python main.py snipe --config canlis.json --json
+t0cksn1per snipe --config canlis.json --json
 ```
 
 When a slot is secured the browser stays open for **10 minutes** — complete checkout manually before Tock releases the hold.
@@ -118,16 +132,16 @@ When a slot is secured the browser stays open for **10 minutes** — complete ch
 ### `run` — recon + snipe in one shot
 
 ```bash
-python main.py run canlis --size 2
+t0cksn1per run canlis --size 2
 
 # Also save the discovered config
-python main.py run canlis --size 2 --save canlis.json
+t0cksn1per run canlis --size 2 --save canlis.json
 
 # Release mode: wait until 11:00 in local machine time, then fire
-python main.py run canlis --size 2 --release-at 11:00
+t0cksn1per run canlis --size 2 --release-at 11:00
 
 # Taneda-style launch mode: only target newly released dates and hit exact slots
-python main.py run taneda \
+t0cksn1per run taneda \
   --size 2 \
   --release-at 11:00 \
   --newly-released-only \
@@ -135,27 +149,27 @@ python main.py run taneda \
   --exact-times "5:15 PM,7:45 PM"
 
 # No date preference: target any newly released date for this party size
-python main.py run taneda \
+t0cksn1per run taneda \
   --size 1 \
   --release-at 11:00 \
   --newly-released-only
 
 # No date preference but deterministic seatings: target the next 30 calendar days by default
-python main.py run taneda \
+t0cksn1per run taneda \
   --size 1 \
   --release-at 11:00 \
   --newly-released-only \
   --exact-times "5:15 PM,7:45 PM"
 
 # Regular monitoring: recon the next 60 days, then keep polling what is eligible now
-python main.py run taneda \
+t0cksn1per run taneda \
   --size 1 \
   --monitor \
   --monitor-duration 15 \
   --interval 5
 
 # Attach to an existing local Chrome via CDP instead of launching a managed browser
-python main.py run taneda \
+t0cksn1per run taneda \
   --size 2 \
   --release-at 11:00 \
   --newly-released-only \
@@ -164,7 +178,7 @@ python main.py run taneda \
   --cdp-url http://127.0.0.1:9222
 
 # Dry-run with custom interval
-python main.py run canlis --size 2 --dry-run --interval 15
+t0cksn1per run canlis --size 2 --dry-run --interval 15
 ```
 
 `--release-at` uses local machine time by default. `--timezone` remains available as an advanced override, but most local runs do not need it.
@@ -209,8 +223,7 @@ Start Chrome with remote debugging enabled:
 Then point `t0cksn1per` at that browser:
 
 ```bash
-PLAYWRIGHT_HEADLESS=0 uvx --from git+https://github.com/murphykobe/T0ckSn1per \
-  t0cksn1per run taneda \
+PLAYWRIGHT_HEADLESS=0 t0cksn1per run taneda \
   --size 2 \
   --release-at 11:00 \
   --newly-released-only \
@@ -226,7 +239,7 @@ If `--cdp-url` is omitted, the CLI keeps using its normal Playwright-managed bro
 ## How it works
 
 ```
-main.py  (CLI)
+t0cksn1per  (CLI)
    │
    ├─ recon.py   ── opens one browser, loads the Tock search page
    │                waits for React to render the calendar
@@ -303,11 +316,11 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 
 ## Tests
 
+> These require the development setup (cloned repo + venv).
+
 ### Unit tests — fast, no browser, no network
 
 ```bash
-venv/bin/pytest tests/ -v
-# or, skipping integration tests explicitly:
 venv/bin/pytest tests/ --ignore=tests/integration -v
 ```
 
