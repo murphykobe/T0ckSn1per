@@ -5,9 +5,6 @@ Uses Playwright (+ stealth) to browse the reservation calendar and extract:
   - Which months/days have open availability
   - What time slots exist
 
-Optionally uses Claude (Anthropic API) to produce a richer analysis when
-ANTHROPIC_API_KEY is set in the environment.
-
 Usage
 -----
   python recon.py <restaurant-slug> [--size 2] [--save config.json]
@@ -263,65 +260,6 @@ def _build_tasks(slug: str, size: str, availability: Dict[str, dict]) -> List[Ta
     return [Task(url=slug, size=size, selectors=selectors)]
 
 
-# ── Optional Claude enhancement ───────────────────────────────────────────────
-
-def _enhance_with_claude(slug: str, size: str, raw: Dict[str, dict]) -> Optional[List[Task]]:
-    """
-    If ANTHROPIC_API_KEY is set, ask Claude to review and refine the scraped
-    availability data (e.g., better time-window selection).
-    Falls back gracefully if the API is unavailable.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return None
-
-    try:
-        import anthropic  # type: ignore
-        client = anthropic.Anthropic(api_key=api_key)
-
-        prompt = f"""
-You are helping configure a reservation sniper for the Tock platform.
-
-Restaurant slug : {slug}
-Party size      : {size}
-Raw scraped data: {json.dumps(raw, indent=2)}
-
-Based on this data, return a JSON array containing exactly ONE task object with this schema:
-[
-  {{
-    "url":     "{slug}",
-    "size":    "{size}",
-    "targets": [
-      {{
-        "date":           "2026-03-15",
-        "earliest_time":  "5:00 PM",
-        "latest_time":    "9:30 PM"
-      }}
-    ]
-  }}
-]
-
-Rules:
-- Include one Target per available date from the raw data.
-- Set earliest_time to the first available slot for that date.
-- Set latest_time to the last available slot for that date.
-- Return ONLY the JSON array, no explanation.
-"""
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = resp.content[0].text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1].lstrip("json").strip()
-        data = json.loads(text)
-        return [Task.from_dict(d) for d in data]
-    except Exception as e:
-        log.debug("Claude enhancement failed (%s), using raw scrape", e)
-        return None
-
-
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def recon(slug: str, size: str = DEFAULT_PARTY_SIZE, lookahead_days: int = 60) -> List[Task]:
@@ -336,10 +274,7 @@ async def recon(slug: str, size: str = DEFAULT_PARTY_SIZE, lookahead_days: int =
         log.warning("[recon] No availability found for %s", slug)
         return []
 
-    # Try Claude enhancement first; fall back to pure scrape
-    tasks = _enhance_with_claude(slug, size, availability)
-    if tasks is None:
-        tasks = _build_tasks(slug, size, availability)
+    tasks = _build_tasks(slug, size, availability)
 
     log.info("[recon] Generated %d task(s) for %s", len(tasks), slug)
     for t in tasks:

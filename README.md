@@ -43,7 +43,7 @@ python3 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 
 # 3. Install with dev/optional extras
-pip install -e ".[dev,ai,notify]"
+pip install -e ".[dev,notify]"
 
 # 4. Install Playwright's Chromium browser
 playwright install chromium
@@ -84,7 +84,7 @@ Sample output:
 ]
 ```
 
-If `ANTHROPIC_API_KEY` is set, Claude will refine the time window. Otherwise a broad fallback (`11:00 AM – 11:30 PM`) is used — edit the JSON to tighten it before sniping.
+If no time slots were sampled, a broad fallback (`12:00 PM – 11:00 PM`) is used — edit the JSON to tighten it before sniping.
 
 ---
 
@@ -244,7 +244,7 @@ t0cksn1per  (CLI)
    ├─ recon.py   ── opens one browser, loads the Tock search page
    │                waits for React to render the calendar
    │                scrapes available months, days, and sample time slots
-   │                optionally refines results with Claude (ANTHROPIC_API_KEY)
+
    │                returns a list of Task objects
    │
    └─ sniper.py  ── opens one browser per Task
@@ -281,7 +281,7 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 |-----------------------|--------------------------------|--------------------------------------------------------|
 | `PLAYWRIGHT_HEADLESS` | `0`                            | Set to `1` for headless mode (CI / no display)         |
 | `CHROME_EXECUTABLE`   | Playwright's bundled Chromium  | Path to a custom Chrome binary                         |
-| `ANTHROPIC_API_KEY`   | —                              | Enables Claude-assisted time-window refinement in recon|
+
 
 ---
 
@@ -395,7 +395,7 @@ PLAYWRIGHT_HEADLESS=0 venv/bin/pytest tests/integration/ -v -s
 
 ```
 main.py                  ← unified CLI (recon / snipe / run)
-recon.py                 ← calendar scraper + optional Claude refinement
+recon.py                 ← calendar scraper
 sniper.py                ← async concurrent slot-clicker
 models.py                ← Task dataclass, shared constants
 notifier.py              ← console banner + desktop notification + bell

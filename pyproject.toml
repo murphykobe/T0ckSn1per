@@ -26,7 +26,6 @@ Homepage = "https://github.com/murphykobe/T0ckSn1per"
 Source = "https://github.com/murphykobe/T0ckSn1per"
 
 [project.optional-dependencies]
-ai = ["anthropic>=0.28.0"]
 notify = ["plyer>=2.1.0"]
 dev = [
     "pytest>=8.0.0",

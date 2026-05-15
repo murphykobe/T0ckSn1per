@@ -2,9 +2,6 @@
 playwright>=1.44.0
 playwright-stealth>=1.0.6
 
-# Optional: AI-assisted recon refinement
-anthropic>=0.28.0
-
 # Optional: desktop notifications
 plyer>=2.1.0
 
