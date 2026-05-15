@@ -29,7 +29,7 @@ This installs the `t0cksn1per` command globally. All usage examples below use th
 ### One-off run (no install)
 
 ```bash
-uvx --from git+https://github.com/murphykobe/T0ckSn1per t0cksn1per --help
+uvx t0cksn1per --help
 ```
 
 ### Development setup (clone the repo)
@@ -200,10 +200,10 @@ This repo includes an OpenClaw-ready skill at `.agents/skills/tock-sniper/SKILL.
 - use node plus headless mode for unattended polling
 - use CDP only when you explicitly want to attach to an existing local Chrome
 
-The skill shells out to the repo CLI instead of reimplementing reservation logic:
+The skill shells out to the CLI instead of reimplementing reservation logic:
 
 ```bash
-uvx --from git+https://github.com/murphykobe/T0ckSn1per t0cksn1per --help
+uvx t0cksn1per --help
 ```
 
 ---
