@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 
-from models import RESERVATION_TIME_FORMAT, Target, Task, expand_date_ranges
+from models import RESERVATION_TIME_FORMAT, LaunchConfig, Target, Task, expand_date_ranges
 from datetime import datetime
 
 
@@ -120,6 +120,32 @@ def test_task_from_dict_accepts_selector_shape():
     assert task.launch.release_at == "11:00"
     assert task.launch.newly_released_only is True
     assert len(task.expand_targets()) == 2
+
+
+def test_launch_config_from_dict_defaults_newly_released_only_false():
+    """Plain release-mode configs (saved before --newly-released-only existed) must
+    stay in release mode on load, not silently switch to launch/newly-released mode."""
+    task = Task.from_dict({
+        "url": "canlis",
+        "size": "2",
+        "launch": {"release_at": "11:00"},
+        "targets": [
+            {
+                "date": "2026-09-01",
+                "earliest_time": "5:00 PM",
+                "latest_time": "9:30 PM",
+            }
+        ],
+    })
+
+    assert task.launch.release_at == "11:00"
+    assert task.launch.newly_released_only is False
+
+
+def test_launch_config_defaults_newly_released_only_false():
+    config = LaunchConfig(release_at="11:00")
+
+    assert config.newly_released_only is False
 
 
 def test_task_from_dict_translates_legacy_targets():

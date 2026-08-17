@@ -33,7 +33,7 @@ class LaunchConfig:
     """Launch-mode settings for timed drops."""
 
     release_at: str
-    newly_released_only: bool = True
+    newly_released_only: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -45,7 +45,7 @@ class LaunchConfig:
     def from_dict(cls, data: dict) -> "LaunchConfig":
         return cls(
             release_at=data["release_at"],
-            newly_released_only=data.get("newly_released_only", True),
+            newly_released_only=data.get("newly_released_only", False),
         )
 
 
