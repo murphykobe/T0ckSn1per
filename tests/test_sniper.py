@@ -951,6 +951,119 @@ async def test_snipe_task_launch_monitoring_retries_until_new_dates_found():
 
 
 @pytest.mark.asyncio
+async def test_snipe_task_auto_detects_hidden_dates_without_newly_released_flag():
+    """Plain release mode (no --newly-released-only) should still catch a target date that
+    isn't on the calendar pre-release, by auto-falling-back to diff-monitoring for it."""
+    from sniper import snipe_task
+
+    browser = AsyncMock()
+    context = AsyncMock()
+    probe = AsyncMock()
+    worker_page = AsyncMock()
+    context.new_page = AsyncMock(side_effect=[probe, worker_page])
+
+    class FakeWorker:
+        created_targets = []
+
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.checkout_url = "(dry-run)"
+            self.matched_time = target.exact_time or target.earliest_time
+            FakeWorker.created_targets.append(target.date)
+
+        async def run(self):
+            return None
+
+    task = Task(
+        url="taneda",
+        size="1",
+        selectors=[Selector(dates=["2026-05-21"], exact_times=["5:15 PM"])],
+        launch=LaunchConfig(release_at="11:00"),  # newly_released_only left at its False default
+    )
+    FakeWorker.created_targets = []
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, True, True))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper._wait_for_release", AsyncMock()):
+                    with patch("sniper.DayWorker", FakeWorker):
+                        with patch(
+                            "sniper._capture_available_dates",
+                            AsyncMock(side_effect=[
+                                {"2026-05-01"},                 # pre-release probe: target date not visible yet
+                                {"2026-05-01", "2026-05-21"},   # post-release: target date now visible
+                            ]),
+                        ):
+                            with patch("sniper.asyncio.sleep", AsyncMock()):
+                                result = await snipe_task(task, dry_run=True)
+
+    assert result == {
+        "restaurant": "taneda",
+        "date": "2026-05-21",
+        "time": "5:15 PM",
+        "checkout_url": "(dry-run)",
+    }
+    assert FakeWorker.created_targets == ["2026-05-21"]
+
+
+@pytest.mark.asyncio
+async def test_snipe_task_plain_release_mode_skips_auto_monitor_when_dates_already_visible():
+    """When every requested date is already on the calendar pre-release, the auto-detect
+    probe should back off immediately and let the normal pre-warm+fire path run unchanged."""
+    from sniper import snipe_task
+
+    browser = AsyncMock()
+    context = AsyncMock()
+    probe = AsyncMock()
+    worker_page = AsyncMock()
+    context.new_page = AsyncMock(side_effect=[probe, worker_page])
+
+    class FakeWorker:
+        created_targets = []
+
+        def __init__(self, task, target, page, found_event, dry_run=False, interval=30.0, prompt_login=False):
+            self.task = task
+            self.target = target
+            self.page = page
+            self.checkout_url = "(dry-run)"
+            self.matched_time = target.exact_time or target.earliest_time
+            FakeWorker.created_targets.append(target.date)
+
+        async def run(self):
+            return None
+
+    task = Task(
+        url="canlis",
+        size="2",
+        selectors=[Selector(dates=["2026-05-21"], earliest_time="5:00 PM", latest_time="9:30 PM")],
+        launch=LaunchConfig(release_at="11:00"),
+    )
+    FakeWorker.created_targets = []
+
+    with patch("sniper.async_playwright", return_value=_FakePlaywrightContextManager(AsyncMock())):
+        with patch("sniper._open_browser_context", AsyncMock(return_value=(browser, context, True, True))):
+            with patch("sniper._apply_stealth", AsyncMock()):
+                with patch("sniper._wait_for_release", AsyncMock()):
+                    with patch("sniper.DayWorker", FakeWorker):
+                        with patch(
+                            "sniper._capture_available_dates",
+                            AsyncMock(return_value={"2026-05-21"}),
+                        ):
+                            result = await snipe_task(task, dry_run=True)
+
+    assert result == {
+        "restaurant": "canlis",
+        "date": "2026-05-21",
+        "time": "5:00 PM",
+        "checkout_url": "(dry-run)",
+    }
+    assert FakeWorker.created_targets == ["2026-05-21"]
+    probe.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_snipe_all_forwards_monitoring_kwargs():
     from sniper import snipe_all
 

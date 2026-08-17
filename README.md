@@ -140,15 +140,19 @@ t0cksn1per run canlis --size 2 --save canlis.json
 # Release mode: wait until 11:00 in local machine time, then fire
 t0cksn1per run canlis --size 2 --release-at 11:00
 
-# Taneda-style launch mode: only target newly released dates and hit exact slots
+# Taneda-style: dates that don't exist on the calendar until release day.
+# --dates says which ones you want; you do NOT need --newly-released-only —
+# the tool checks the calendar right before firing and auto-detects that
+# these dates aren't there yet, then switches to diff-monitoring for them.
 t0cksn1per run taneda \
   --size 2 \
   --release-at 11:00 \
-  --newly-released-only \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM"
 
-# No date preference: target any newly released date for this party size
+# No date preference at all: you don't know which date will drop, just
+# "whatever opens up." There's nothing concrete to check visibility
+# against here, so this is the one case that still needs the explicit flag.
 t0cksn1per run taneda \
   --size 1 \
   --release-at 11:00 \
@@ -172,7 +176,6 @@ t0cksn1per run taneda \
 t0cksn1per run taneda \
   --size 2 \
   --release-at 11:00 \
-  --newly-released-only \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM" \
   --cdp-url http://127.0.0.1:9222
@@ -183,10 +186,19 @@ t0cksn1per run canlis --size 2 --dry-run --interval 15
 
 `--release-at` uses local machine time by default. `--timezone` remains available as an advanced override, but most local runs do not need it.
 
+### Release mode vs. launch mode — and why you usually don't have to pick
+
+`--release-at` only tells the tool *when* to act. It doesn't say what Tock is going to do at that moment — and that varies by restaurant:
+
+- **Times unlock on a date that's already on the calendar** (Canlis-style). The day is already clickable; you're waiting for a specific window on it to open. The tool pre-loads that date's page ahead of time so it's ready to click the instant 11:00 hits.
+- **A whole new date appears out of nowhere** (Taneda-style). Nothing to pre-load — the date doesn't exist on the calendar until release. The only way to catch it is to snapshot the calendar before and after 11:00 and watch for what's new.
+
+You don't need to know in advance which one you're dealing with. As long as you pass `--dates`, the tool checks the calendar right before firing: any of your requested dates that are already visible get the normal pre-warm-and-click treatment; any that aren't get diff-monitored automatically. `--newly-released-only` still exists, but only matters when you have **no date preference at all** — "grab whatever date drops" — since there's no concrete date to check visibility against in that case, so the tool can't infer anything and needs to be told explicitly to watch for new dates.
+
 Default windows:
 - launch mode without explicit dates targets the next 30 calendar days
 - regular `recon` and `run` look ahead 60 calendar days
-- `--monitor-duration` defaults to 15 minutes
+- `--monitor-duration` defaults to 15 minutes (also bounds how long auto-detected hidden dates are monitored for after release)
 
 The `run` subcommand accepts all the same flags as `snipe` (`--interval`, `--max-duration`, `--release-at`, `--newly-released-only`, `--dates`, `--exact-times`, `--timezone`, `--cookies-file`, `--login`, `--prompt-login`, `--json`, `--dry-run`).
 
@@ -226,7 +238,6 @@ Then point `t0cksn1per` at that browser:
 PLAYWRIGHT_HEADLESS=0 t0cksn1per run taneda \
   --size 2 \
   --release-at 11:00 \
-  --newly-released-only \
   --dates 2026-06-17,2026-06-18 \
   --exact-times "5:15 PM,7:45 PM" \
   --cdp-url http://127.0.0.1:9222
@@ -304,7 +315,7 @@ All optional. Set in your shell or a `.env` file (loaded manually — no `python
 | `--monitor-duration MINUTES` | Monitoring window in minutes (default: 15)            |
 | `--release-at HH:MM` | Start sniping at this local machine time                       |
 | `--cdp-url URL`   | Advanced: connect to an existing Chrome/Chromium CDP endpoint     |
-| `--newly-released-only` | In launch mode, target only dates that appear after release |
+| `--newly-released-only` | Force launch mode with no date preference — watch for *any* newly released date. Not needed when you already pass `--dates`; the tool auto-detects per-date whether it's pre-existing or newly-released. |
 | `--timezone TZ`   | Optional advanced override for `--release-at`                      |
 | `--cookies-file FILE` | Path to Netscape cookies file for authentication               |
 | `--login`         | Perform interactive browser login before sniping                   |

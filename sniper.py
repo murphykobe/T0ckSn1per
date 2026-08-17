@@ -893,6 +893,40 @@ async def snipe_task(
         elif monitor:
             monitor_deadline = asyncio.get_running_loop().time() + (monitor_duration * 60)
 
+        # Auto-detect dates that aren't on the calendar yet, even without --newly-released-only.
+        # Plain release mode assumes the target date is already visible and just waiting for
+        # times to unlock; if it isn't there pre-release, pre-warming its page is pointless —
+        # fall back to diff-monitoring for exactly those dates, same mechanism launch mode uses.
+        auto_hidden_dates: List[str] = []
+        auto_hidden_scout = None
+        auto_hidden_baseline: Optional[set] = None
+        if effective_release_at and not launch_newly_released_only:
+            requested_dates = _requested_dates_from_task(resolved_task)
+            if requested_dates:
+                probe = await context.new_page()
+                await _apply_stealth(probe)
+                try:
+                    auto_hidden_baseline = await _capture_available_dates(probe, resolved_task.url, resolved_task.size)
+                except Exception as e:
+                    log.warning(
+                        "[%s] Pre-release visibility check failed: %s — assuming all target dates are visible.",
+                        resolved_task.url, e,
+                    )
+                    auto_hidden_baseline = set(requested_dates)
+                auto_hidden_dates = [d for d in requested_dates if d not in auto_hidden_baseline]
+                if auto_hidden_dates:
+                    opened_pages.append(probe)
+                    auto_hidden_scout = probe
+                    visible_dates = [d for d in requested_dates if d not in auto_hidden_dates]
+                    log.info(
+                        "[%s] %d target date(s) not yet on the calendar — will auto-monitor for "
+                        "them after release instead of pre-warming: %s",
+                        resolved_task.url, len(auto_hidden_dates), ", ".join(auto_hidden_dates),
+                    )
+                    resolved_task = resolved_task.filter_dates(visible_dates)
+                else:
+                    await probe.close()
+
         # Open one tab per target
         workers: List[DayWorker] = []
         expanded_targets = resolved_task.expand_targets()
@@ -906,21 +940,57 @@ async def snipe_task(
 
         # Pre-warm all pages in release mode so they're loaded before the countdown ends
         if effective_release_at and not launch_newly_released_only:
-            log.info("[%s] Pre-warming %d worker pages...", resolved_task.url, len(workers))
-            for w in workers:
-                try:
-                    await w.page.goto(
-                        w.target.search_url(resolved_task.url, resolved_task.size),
-                        wait_until="domcontentloaded",
-                        timeout=PAGE_LOAD_TIMEOUT,
-                    )
-                except Exception as e:
-                    log.warning("[%s/%s] Pre-warm failed: %s", resolved_task.url, w.target.date, e)
+            if workers:
+                log.info("[%s] Pre-warming %d worker pages...", resolved_task.url, len(workers))
+                for w in workers:
+                    try:
+                        await w.page.goto(
+                            w.target.search_url(resolved_task.url, resolved_task.size),
+                            wait_until="domcontentloaded",
+                            timeout=PAGE_LOAD_TIMEOUT,
+                        )
+                    except Exception as e:
+                        log.warning("[%s/%s] Pre-warm failed: %s", resolved_task.url, w.target.date, e)
 
             await _wait_for_release(effective_release_at, timezone=timezone)
 
+        async def _catch_auto_hidden_dates(deadline: float) -> None:
+            """Diff the calendar for dates auto-detected as hidden pre-release, then spawn
+            workers for whichever of them actually show up."""
+            newly_dates = await _monitor_newly_released_dates(
+                auto_hidden_scout,
+                task,
+                requested_dates=auto_hidden_dates,
+                interval=interval,
+                deadline=deadline,
+                baseline_dates=auto_hidden_baseline,
+            )
+            await auto_hidden_scout.close()
+            if not newly_dates or found_event.is_set():
+                return
+            log.info(
+                "[%s] Auto-detected newly released date(s): %s",
+                task.url, ", ".join(newly_dates),
+            )
+            newly_task = task.filter_dates(newly_dates)
+            for target in newly_task.expand_targets():
+                if found_event.is_set():
+                    break
+                page = await context.new_page()
+                opened_pages.append(page)
+                await _apply_stealth(page)
+                w = DayWorker(
+                    newly_task, target, page, found_event,
+                    dry_run=dry_run, interval=interval, prompt_login=prompt_login,
+                )
+                workers.append(w)
+                worker_tasks.append(asyncio.create_task(w.run()))
+
         # Run all workers concurrently
         worker_tasks = [asyncio.create_task(w.run()) for w in workers]
+        if auto_hidden_dates:
+            hidden_deadline = asyncio.get_running_loop().time() + (monitor_duration * 60)
+            worker_tasks.append(asyncio.create_task(_catch_auto_hidden_dates(hidden_deadline)))
         timeout_seconds, timeout_message = _monitor_timeout_message(max_duration, monitor_deadline)
         await _wait_for_worker_outcome(
             task.url,
